@@ -1,4 +1,4 @@
-# NuRepress integrated pipeline
+# NuRepress: inferring transcriptional repressors from phased nucleosome architecture
 
 NuRepress is an end-to-end workflow for identifying well-phased nucleosome arrays in repressive chromatin, stratifying array subtypes by accessibility patterns, performing motif enrichment on subtype-defined regions, and prioritizing candidate transcriptional repressors by integrating chromatin structure, sequence evidence, and transcriptional effects.
 
