@@ -1,0 +1,4 @@
+sample	positions_xls	atac_bw	treatment	control	peak_bed	species	genome	dpos_xls	insertion_bw	genome_fasta	chrom_sizes	annotation_gtf	motif_annotation_file
+sample1		/path/to/sample1.atac.bw	/path/to/sample1_treatment.bam	/path/to/sample1_control.bam	/path/to/sample1_peaks.bed	hg38	hg38			/path/to/genome.fa	/path/to/genome.chrom.sizes	/path/to/annotation.gtf.gz	/path/to/annotation.gtf.gz
+sample2		/path/to/sample2.atac.bw	/path/to/sample2_treatment.bam	/path/to/sample2_control.bam	/path/to/sample2_peaks.bed	hg38	hg38			/path/to/genome.fa	/path/to/genome.chrom.sizes	/path/to/annotation.gtf.gz	/path/to/annotation.gtf.gz
+sample3		/path/to/sample3.atac.bw	/path/to/sample3_treatment.bam	/path/to/sample3_control.bam	/path/to/sample3_peaks.bed	hg38	hg38			/path/to/genome.fa	/path/to/genome.chrom.sizes	/path/to/annotation.gtf.gz	/path/to/annotation.gtf.gz

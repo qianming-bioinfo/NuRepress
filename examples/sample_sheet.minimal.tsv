@@ -1,0 +1,4 @@
+sample	atac_bw	treatment	control	species
+sample1	/path/to/sample1.atac.bw	/path/to/sample1_treatment.bam	/path/to/sample1_control.bam	hg38
+sample2	/path/to/sample2.atac.bw	/path/to/sample2_treatment.bam	/path/to/sample2_control.bam	hg38
+sample3	/path/to/sample3.atac.bw	/path/to/sample3_treatment.bam	/path/to/sample3_control.bam	hg38

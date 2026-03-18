@@ -1,0 +1,34 @@
+name: nurepress
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pandas>=1.5
+  - numpy>=1.23
+  - scipy
+  - tqdm>=4.64
+  - pybigwig>=0.3.22
+  - samtools
+  - bedtools
+  - perl
+  - r-base=4.3
+  - r-readr
+  - r-dplyr
+  - r-tidyr
+  - r-stringr
+  - r-ggplot2
+  - r-data.table
+  - r-purrr
+  - r-cluster
+  - r-mclust
+  - bioconductor-genomicranges
+  - bioconductor-iranges
+  - bioconductor-s4vectors
+  - bioconductor-rtracklayer
+  - bioconductor-rsamtools
+  - bioconductor-biostrings
+  - pip:
+      - SICER2

@@ -1,0 +1,4 @@
+pandas>=1.5
+numpy>=1.23
+tqdm>=4.64
+pyBigWig>=0.3.22
