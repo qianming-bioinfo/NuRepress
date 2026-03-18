@@ -433,11 +433,3 @@ If you use this repository in a manuscript, please cite:
 
 1. The NuRepress manuscript or software paper, once available.
 2. The underlying external tools used in your workflow, especially DANPOS, SICER/SICER2, HOMER, and the Bioconductor packages used for genomic interval and annotation handling.
-
-
----
-
-## Notes
-
-- Public examples in this repository intentionally use generic placeholders such as `sample1`, `sample2`, and `/path/to/...`.
-- For reproducibility, keep your final repository release synchronized with the exact script bundle used in the manuscript.
