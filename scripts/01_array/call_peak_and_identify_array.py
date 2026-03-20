@@ -709,9 +709,9 @@ def read_bed3_ignore_extra(path: str) -> pd.DataFrame:
 
 
 def read_peak_bed3(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, sep="\t", header=None, comment="#", dtype={0: str})
+    df = pd.read_csv(path, sep=r"\s+", header=None, comment="#", engine="python", dtype={0: str})
     if df.shape[1] < 3:
-        raise ValueError(f"Peak BED must have >=3 columns: {path}")
+        raise ValueError(f"Peak file must have >=3 columns: {path}")
     df = df.iloc[:, :3].copy()
     df.columns = ["chr", "start", "end"]
     df["start"] = pd.to_numeric(df["start"], errors="coerce")
@@ -801,25 +801,37 @@ def filter_phased_by_peak_overlap(phased: pd.DataFrame, peaks: pd.DataFrame, min
 
 
 def locate_peak_bed(peak_dir: str) -> str:
-    bed_files = sorted(glob.glob(os.path.join(peak_dir, "**", "*.bed"), recursive=True))
-    if not bed_files:
-        raise FileNotFoundError(f"No BED files found under SICER output directory: {peak_dir}")
+    all_files = sorted(glob.glob(os.path.join(peak_dir, "**", "*"), recursive=True))
+    all_files = [x for x in all_files if os.path.isfile(x)]
 
-    def score(path: str) -> Tuple[int, int, str]:
+    if not all_files:
+        raise FileNotFoundError(f"No files found under SICER output directory: {peak_dir}")
+
+    bed_files = [x for x in all_files if x.lower().endswith(".bed")]
+    scoreisland_files = [x for x in all_files if x.lower().endswith(".scoreisland")]
+
+    def bed_score(path: str) -> Tuple[int, int, str]:
         base = os.path.basename(path).lower()
         if base.endswith("island.bed"):
             return (0, len(base), path)
         if "island" in base and "filtered" not in base and "significant" not in base:
             return (1, len(base), path)
-        return (2, len(base), path)
+        if base.endswith("islandfiltered.bed"):
+            return (2, len(base), path)
+        return (3, len(base), path)
 
-    ranked = sorted(bed_files, key=score)
-    if len(ranked) > 1 and score(ranked[0])[0] == score(ranked[1])[0] == 2:
-        raise RuntimeError(
-            "Unable to uniquely identify SICER peak BED. Please use --peak_bed directly or clean the output directory.\n"
-            + "\n".join(ranked)
-        )
-    return ranked[0]
+    if bed_files:
+        ranked = sorted(bed_files, key=bed_score)
+        return ranked[0]
+
+    if scoreisland_files:
+        ranked = sorted(scoreisland_files, key=lambda x: (len(os.path.basename(x)), x))
+        return ranked[0]
+
+    raise FileNotFoundError(
+        f"No SICER island-like output found under: {peak_dir}\n"
+        f"Expected either *.bed (with control) or *.scoreisland (without control)."
+    )
 
 
 def run_sicer2(args, peak_dir: str) -> Tuple[str, str]:
@@ -839,7 +851,7 @@ def run_sicer2(args, peak_dir: str) -> Tuple[str, str]:
     if args.control:
         cmd.extend(["-c", args.control])
     else:
-        cmd.extend(["-e", str(args.sicer_e_value)])
+        cmd.extend(["-e", str(int(args.sicer_e_value))])
     if args.sicer_cpu is not None:
         cmd.extend(["-cpu", str(args.sicer_cpu)])
     if args.sicer_significant_reads:
@@ -924,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Run SICER2 broad peak calling, identify well-phased nucleosome arrays, and optionally keep only arrays overlapping SICER peaks."
     )
-    ap.add_argument("-i", "--input", required=True, help="DANPOS output: *.bgsub.Fnor.smooth.positions.ref_adjust.xls")
+    ap.add_argument("-i", "--input", required=True, help="DANPOS output: *positions*.xls")
     ap.add_argument("-O", "--output_dir", required=True, help="Output directory")
 
     ap.add_argument("--method", choices=["seedextend", "mergewindow"], default="seedextend", help="Array-identification method (default: seedextend)")
@@ -963,7 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sicer_redundancy_threshold", type=int, default=1, help="SICER2 -rt / --redundancy_threshold (default: 1)")
     ap.add_argument("--sicer_fragment_size", type=int, default=150, help="SICER2 -f / --fragment_size (default: 150)")
     ap.add_argument("--sicer_effective_genome_fraction", type=float, default=0.74, help="SICER2 -egf / --effective_genome_faction (default: 0.74)")
-    ap.add_argument("--sicer_e_value", type=float, default=1000.0, help="SICER2 -e / --e_value, used when no control is provided (default: 1000)")
+    ap.add_argument("--sicer_e_value", type=int, default=1000, help="SICER2 -e / --e_value, used when no control is provided (default: 1000)")
     ap.add_argument("--sicer_cpu", type=int, default=None, help="SICER2 -cpu / --cpu")
     ap.add_argument("--sicer_significant_reads", action="store_true", help="Pass --significant_reads to SICER2")
     ap.add_argument("--sicer_extra_args", type=str, default="", help='Extra SICER2 arguments as a single quoted string, e.g. "--foo 1 --bar 2"')

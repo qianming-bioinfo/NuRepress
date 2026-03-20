@@ -14,6 +14,12 @@ import numpy as np
 import pandas as pd
 
 
+def need_cmd(cmd: str) -> str:
+    path = shutil.which(cmd)
+    if path is None:
+        raise RuntimeError(f"Required command not found in PATH: {cmd}")
+    return path
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 

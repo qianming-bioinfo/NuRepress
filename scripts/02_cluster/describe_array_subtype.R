@@ -315,7 +315,7 @@ run_basic_module <- function(df, out_dir, opt) {
   write_table(df, file.path(mod_dir, "cluster_assignment.standardized.tsv"))
 
   counts <- df %>%
-    count(sample, cluster, name = "n_regions") %>%
+    dplyr::count(sample, cluster, name = "n_regions") %>%
     group_by(sample) %>%
     mutate(prop = n_regions / sum(n_regions)) %>%
     ungroup()

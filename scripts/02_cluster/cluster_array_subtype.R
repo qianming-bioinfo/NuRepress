@@ -21,7 +21,7 @@ print_help <- function() {
 
 Required:
   --sample_sheet FILE        Tabular sample sheet with columns:
-                             cell_type, regions_bed, atac_bw
+                             sample, regions_bed, atac_bw
   --out_dir DIR             Output directory
 
 Optional:
@@ -57,7 +57,7 @@ Example:
     --ks 2,3,4,5,6
 
 Sample sheet example:
-  cell_type\tregions_bed\tatac_bw
+  sample\tregions_bed\tatac_bw
   sample1\t/path/to/sample1_regions.bed\t/path/to/sample1_atac.bw
   sample2\t/path/to/sample2_regions.bed\t/path/to/sample2_atac.bw
 ",
@@ -164,7 +164,7 @@ read_sample_sheet <- function(path, delim_mode = "auto") {
   )
   df <- as.data.frame(df, stringsAsFactors = FALSE)
   df <- trim_ws_df(df)
-  req <- c("cell_type", "regions_bed", "atac_bw")
+  req <- c("sample", "regions_bed", "atac_bw")
   miss <- setdiff(req, colnames(df))
   if (length(miss) > 0) stop("sample_sheet missing columns: ", paste(miss, collapse = ", "))
   df
@@ -193,7 +193,7 @@ bw_import_as_rlelist <- function(path) {
   stop("bw_import_as_rlelist: unsupported import type: ", paste(class(x2), collapse = ", "))
 }
 
-read_bed_any_to_df <- function(bed_path, cell_type) {
+read_bed_any_to_df <- function(bed_path, sample) {
   df <- readr::read_tsv(
     bed_path,
     col_names = FALSE,
@@ -207,9 +207,9 @@ read_bed_any_to_df <- function(bed_path, cell_type) {
   end   <- as.integer(df[[3]])
   id <- if (ncol(df) >= 4) as.character(df[[4]]) else NA_character_
   if (all(is.na(id)) || all(id == "")) {
-    id <- paste0(cell_type, "_region_", seq_along(chr))
+    id <- paste0(sample, "_region_", seq_along(chr))
   } else {
-    id[id == "" | is.na(id)] <- paste0(cell_type, "_region_", which(id == "" | is.na(id)))
+    id[id == "" | is.na(id)] <- paste0(sample, "_region_", which(id == "" | is.na(id)))
   }
   out <- data.frame(chr = chr, start = start, end = end, region_id = id, stringsAsFactors = FALSE)
   out <- out[is.finite(out$start) & is.finite(out$end) & out$start <= out$end, , drop = FALSE]
@@ -426,21 +426,21 @@ main <- function() {
 
   samples <- read_sample_sheet(opt$sample_sheet, opt$sample_sheet_delim)
   if (is.null(opt$sample_order)) {
-    sample_order <- samples$cell_type
+    sample_order <- samples$sample
   } else {
     sample_order <- opt$sample_order
-    missing_order <- setdiff(sample_order, samples$cell_type)
-    extra_sheet <- setdiff(samples$cell_type, sample_order)
+    missing_order <- setdiff(sample_order, samples$sample)
+    extra_sheet <- setdiff(samples$sample, sample_order)
     if (length(missing_order) > 0) stop("sample_order contains values absent from sample_sheet: ", paste(missing_order, collapse = ", "))
     if (length(extra_sheet) > 0) stop("sample_sheet contains values absent from sample_order: ", paste(extra_sheet, collapse = ", "))
-    samples <- samples[match(sample_order, samples$cell_type), , drop = FALSE]
+    samples <- samples[match(sample_order, samples$sample), , drop = FALSE]
   }
 
   for (i in seq_len(nrow(samples))) {
     stop_if_missing(samples$regions_bed[i])
     stop_if_missing(samples$atac_bw[i])
   }
-  stopifnot(all(samples$cell_type == sample_order))
+  stopifnot(all(samples$sample == sample_order))
 
   metadata_file <- file.path(opt$out_dir, "run_metadata.txt")
   writeLines(c(
@@ -805,7 +805,7 @@ main <- function() {
   write_tsv(df_cluster_assign, file.path(cluster_out_dir, paste0("k", best_k, "_cluster_assignment.z1z2.", fit_space_label, ".tsv")))
 
   df_cluster_summary <- df_cluster_assign %>%
-    count(sample, cluster, name = "n_regions") %>%
+    dplyr::count(sample, cluster, name = "n_regions") %>%
     group_by(sample) %>%
     mutate(prop = n_regions / sum(n_regions)) %>%
     ungroup() %>%
@@ -883,63 +883,6 @@ main <- function() {
       dev.off()
     }
   }
-
-  message(">>> [9] 2D scatter in clustering space")
-  cs_dir <- file.path(opt$out_dir, "cluster_space_scatter")
-  dir.create(cs_dir, recursive = TRUE, showWarnings = FALSE)
-
-  set.seed(opt$seed)
-  df_cs <- df_cluster_assign %>%
-    mutate(
-      sample = factor(as.character(sample), levels = sample_order),
-      cluster = factor(cluster, levels = sort(unique(cluster))),
-      coord1 = fit_space_coord1,
-      coord2 = fit_space_coord2
-    )
-
-  df_cs_plot <- df_cs %>%
-    group_by(sample) %>%
-    group_modify(~{
-      n <- nrow(.x)
-      if (n > opt$max_points_per_sample_cs) .x[sample.int(n, opt$max_points_per_sample_cs), , drop = FALSE] else .x
-    }) %>%
-    ungroup()
-
-  if (nrow(df_cs_plot) > 0) {
-    p_cs <- ggplot(df_cs_plot, aes(x = coord1, y = coord2, color = cluster)) +
-      geom_point(size = 0.35, alpha = 0.25) +
-      stat_ellipse(aes(group = cluster), type = "t", linewidth = 0.35, alpha = 0.25) +
-      facet_wrap(~ sample, nrow = 1, drop = FALSE) +
-      theme_bw() +
-      labs(
-        title = paste0("Clustering space scatter (", fit_space_label, "), k=", best_k),
-        x = fit_space_xlab,
-        y = fit_space_ylab,
-        color = paste0("k=", best_k, " cluster")
-      )
-    pdf(file.path(cs_dir, paste0("cluster_space.scatter.bySample.", fit_space_label, ".k", best_k, ".pdf")), width = 12.5, height = 4.8)
-    print(p_cs)
-    dev.off()
-
-    p_cs_all <- ggplot(df_cs_plot, aes(x = coord1, y = coord2, color = cluster)) +
-      geom_point(size = 0.3, alpha = 0.15) +
-      stat_ellipse(aes(group = cluster), type = "t", linewidth = 0.35, alpha = 0.25) +
-      theme_bw() +
-      labs(
-        title = paste0("Clustering space scatter (all samples pooled; ", fit_space_label, "; k=", best_k, ")"),
-        x = fit_space_xlab,
-        y = fit_space_ylab,
-        color = paste0("k=", best_k, " cluster")
-      )
-    pdf(file.path(cs_dir, paste0("cluster_space.scatter.ALLsamples.", fit_space_label, ".k", best_k, ".pdf")), width = 6.8, height = 5.6)
-    print(p_cs_all)
-    dev.off()
-  }
-
-  write_tsv(
-    df_cs %>% dplyr::select(any_of(c("sample","region_id","chr","start","end")), z1, z2, coord1, coord2, cluster),
-    file.path(cs_dir, paste0("cluster_space_coords.", fit_space_label, ".k", best_k, ".tsv"))
-  )
 
   message("=== ALL DONE ===")
   message("Output dir: ", opt$out_dir)
