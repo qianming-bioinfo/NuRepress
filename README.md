@@ -106,6 +106,64 @@ It produces:
 
 ---
 
+## Quick start
+
+### Full workflow with control BAMs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps nucleosome,array,cluster,describe,motif,score \
+  --samples sample1,sample2,sample3 \
+  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
+  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
+  --control_map "sample1=/path/to/sample1.input.bam;sample2=/path/to/sample2.input.bam;sample3=/path/to/sample3.input.bam" \
+  --genome hg38 \
+  --genome_fasta /path/to/genome.fa \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --annotation_gtf /path/to/annotation.gtf \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Full workflow without control BAMs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps nucleosome,array,cluster,describe,motif,score \
+  --samples sample1,sample2,sample3 \
+  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
+  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
+  --genome hg38 \
+  --genome_fasta /path/to/genome.fa \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --annotation_gtf /path/to/annotation.gtf \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Rerun only motif and score using existing outputs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps motif,score \
+  --samples sample1,sample2,sample3 \
+  --annotation_gtf /path/to/annotation.gtf \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --genome hg38 \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Rerun only score using existing describe and motif outputs
+
+```bash
+run_nurepress_cli.py score \
+  --out_dir /path/to/output \
+  --expr_tsv /path/to/expression.tsv
+```
+
+---
+
 
 ## Repository contents
 
@@ -860,65 +918,7 @@ Because of this design, a typical workflow is:
 
 ---
 
-## Quick examples
 
-### Full workflow with control BAMs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps nucleosome,array,cluster,describe,motif,score \
-  --samples sample1,sample2,sample3 \
-  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
-  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
-  --control_map "sample1=/path/to/sample1.input.bam;sample2=/path/to/sample2.input.bam;sample3=/path/to/sample3.input.bam" \
-  --genome hg38 \
-  --genome_fasta /path/to/genome.fa \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --annotation_gtf /path/to/annotation.gtf \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Full workflow without control BAMs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps nucleosome,array,cluster,describe,motif,score \
-  --samples sample1,sample2,sample3 \
-  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
-  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
-  --genome hg38 \
-  --genome_fasta /path/to/genome.fa \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --annotation_gtf /path/to/annotation.gtf \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Rerun only motif and score using existing outputs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps motif,score \
-  --samples sample1,sample2,sample3 \
-  --annotation_gtf /path/to/annotation.gtf \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --genome hg38 \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Rerun only score using existing describe and motif outputs
-
-```bash
-run_nurepress_cli.py score \
-  --out_dir /path/to/output \
-  --expr_tsv /path/to/expression.tsv
-```
-
----
-
----
 
 ## Troubleshooting
 
