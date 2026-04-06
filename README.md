@@ -843,26 +843,7 @@ run_nurepress_cli.py motif \
   --genome hg19 \
   --chrom_sizes /path/to/hg19.chrom.sizes \
   --positions_map "sample1=/path/to/sample1_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls;sample2=/path/to/sample2_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls;sample3=/path/to/sample3_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls" \
-  --motif_mode edge_both \
-  --internal_region_mode both \
-  --inside_start_rel -475 \
-  --inside_end_rel -75 \
-  --inside_num_bins 2 \
-  --outside_start_bp 75 \
-  --outside_end_bp 675 \
-  --outside_num_bins 3 \
-  --target_clusters ALL \
-  --bg_multiple 2 \
-  --annotation_gtf /path/to/hg19.ensGene.gtf.gz \
-  --cluster_dir_default neutral \
-  --cluster_dir_map "C1=inside_low;C2=neutral" \
-  --require_positive_score \
-  --score_flank_bp 800 \
-  --score_edge_bp 200 \
-  --q_keep 0.95 \
-  --bg_match_location \
-  --min_n_target_arrays 30
-```
+
 
 #### 3.3 Score
 ```bash
