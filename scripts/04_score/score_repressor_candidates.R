@@ -382,7 +382,7 @@ plot_signed_score_one_sample <- function(sample_name, prediction_df, cluster_lev
   p <- ggplot(df_plot, aes(x = prediction_score_signed, y = tf_plot, fill = S_score)) +
     geom_col(width = 0.72) +
     geom_vline(xintercept = 0, linetype = "dashed", linewidth = 0.4) +
-    facet_wrap(~ cluster, scales = "free_y", ncol = ncol_fac) +
+    facet_wrap(~ cluster, scales = "free", ncol = ncol_fac) +
     scale_y_reordered() +
     scale_fill_gradient2(low = "#3B82F6", mid = "grey90", high = "#D62728", midpoint = 0, name = "S[s,c,t]") +
     labs(
@@ -399,8 +399,8 @@ plot_signed_score_one_sample <- function(sample_name, prediction_df, cluster_lev
       axis.text.y = element_text(size = 8)
     )
 
-  ggsave(file.path(plot_dir, paste0(sample_name, ".signed_repressor_prediction_score.top", top_n, ".pdf")), p, width = max(10, 4 * ncol_fac), height = 7)
-  ggsave(file.path(plot_dir, paste0(sample_name, ".signed_repressor_prediction_score.top", top_n, ".png")), p, width = max(10, 4 * ncol_fac), height = 7, dpi = 300)
+  ggsave(file.path(plot_dir, paste0(sample_name, ".signed_repressor_prediction_score.top", top_n, ".pdf")), p, width = max(10, 4 * ncol_fac), height = 4)
+  ggsave(file.path(plot_dir, paste0(sample_name, ".signed_repressor_prediction_score.top", top_n, ".png")), p, width = max(10, 4 * ncol_fac), height = 4, dpi = 300)
 }
 
 plot_priority_score_one_sample <- function(sample_name, priority_prediction_df, cluster_levels, plot_dir, top_n) {
@@ -420,7 +420,7 @@ plot_priority_score_one_sample <- function(sample_name, priority_prediction_df, 
 
   p <- ggplot(df_plot, aes(x = priority_score, y = tf_plot, fill = S_score)) +
     geom_col(width = 0.72) +
-    facet_wrap(~ cluster, scales = "free_y", ncol = ncol_fac) +
+    facet_wrap(~ cluster, scales = "free", ncol = ncol_fac) +
     scale_y_reordered() +
     scale_fill_gradient2(low = "#3B82F6", mid = "grey90", high = "#D62728", midpoint = 0, name = "S[s,c,t]") +
     labs(
@@ -437,8 +437,8 @@ plot_priority_score_one_sample <- function(sample_name, priority_prediction_df, 
       axis.text.y = element_text(size = 8)
     )
 
-  ggsave(file.path(plot_dir, paste0(sample_name, ".priority_repressor_prediction_score.top", top_n, ".pdf")), p, width = max(10, 4 * ncol_fac), height = 7)
-  ggsave(file.path(plot_dir, paste0(sample_name, ".priority_repressor_prediction_score.top", top_n, ".png")), p, width = max(10, 4 * ncol_fac), height = 7, dpi = 300)
+  ggsave(file.path(plot_dir, paste0(sample_name, ".priority_repressor_prediction_score.top", top_n, ".pdf")), p, width = max(10, 4 * ncol_fac), height = 4)
+  ggsave(file.path(plot_dir, paste0(sample_name, ".priority_repressor_prediction_score.top", top_n, ".png")), p, width = max(10, 4 * ncol_fac), height = 4, dpi = 300)
 }
 
 main <- function() {
@@ -513,9 +513,31 @@ main <- function() {
     dplyr::mutate(sample = factor(sample, levels = sample_levels))
   all_expr_gene_ids <- unique(expr_by_sample$gene_id)
 
-  tss_dt <- data.table::fread(opt$tss_anno_tsv) %>% as.data.frame()
-  if (!opt$promoter_flag_col %in% colnames(tss_dt)) stop2("promoter flag column not found in TSS annotation TSV: ", opt$promoter_flag_col)
+  tss_dt <- data.table::fread(
+    opt$tss_anno_tsv,
+    sep = "\t",
+    header = TRUE,
+    fill = TRUE,
+    quote = "",
+    data.table = FALSE,
+    check.names = FALSE
+  )
 
+  if (!opt$promoter_flag_col %in% colnames(tss_dt)) {
+    stop2("promoter flag column not found in TSS annotation TSV: ", opt$promoter_flag_col)
+  }
+  if (!"sample" %in% colnames(tss_dt)) {
+    stop2("TSS annotation TSV is missing required column: sample")
+  }
+  if (!"region_id" %in% colnames(tss_dt)) {
+    stop2("TSS annotation TSV is missing required column: region_id")
+  }
+
+  tss_dt <- tss_dt %>%
+    dplyr::mutate(
+      sample = as.character(sample),
+      region_id = as.character(region_id)
+    )
   gene_id_candidates <- split_csv(opt$gene_id_candidates)
   gene_id_col <- choose_gene_id_col(tss_dt, all_expr_gene_ids, gene_id_candidates)
 
@@ -552,7 +574,7 @@ main <- function() {
 
     if (nrow(hits_s) == 0) hits_s <- data.frame(gene_id = character(0), stringsAsFactors = FALSE)
     for (cc in cluster_levels) {
-      if (!cc %in% colnames(hits_s)) hits_s[[cc]] <- FALSE
+      if (!cc %in% colnames(hits_s)) hits_s[[cc]] <- logical(nrow(hits_s))
     }
 
     out <- expr_s %>% dplyr::left_join(hits_s, by = "gene_id")

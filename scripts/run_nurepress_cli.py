@@ -201,6 +201,7 @@ def build_samples_df(
     treatment_map: Optional[str] = "",
     control_map: Optional[str] = "",
     peak_bed_map: Optional[str] = "",
+    regions_bed_map: Optional[str] = "",
     dpos_map: Optional[str] = "",
     insertion_bw_map: Optional[str] = "",
     genome: Optional[str] = "",
@@ -225,6 +226,7 @@ def build_samples_df(
     treatment = parse_sample_map(treatment_map, "--treatment_map")
     control = parse_sample_map(control_map, "--control_map")
     peak_bed = parse_sample_map(peak_bed_map, "--peak_bed_map")
+    regions_bed = parse_sample_map(regions_bed_map, "--regions_bed_map")
     dpos = parse_sample_map(dpos_map, "--dpos_map")
     insertion_bw = parse_sample_map(insertion_bw_map, "--insertion_bw_map")
 
@@ -236,14 +238,24 @@ def build_samples_df(
     if require_genome and not genome:
         raise PipelineError("--genome is required for the selected command")
 
+    positions_xls = materialize_sample_field(
+        sample_list, positions, "--positions_map", required=require_positions
+    )
+    dpos_xls = materialize_sample_field(
+        sample_list, dpos, "--dpos_map", required=False
+    )
+
+    dpos_xls_final = [
+        d if str(d).strip() != "" else p
+        for p, d in zip(positions_xls, dpos_xls)
+    ]
+
     df = pd.DataFrame({
         "sample": sample_list,
         "atac_bw": materialize_sample_field(
             sample_list, atac_bw, "--atac_bw_map", required=require_atac_bw
         ),
-        "positions_xls": materialize_sample_field(
-            sample_list, positions, "--positions_map", required=require_positions
-        ),
+        "positions_xls": positions_xls,
         "treatment": materialize_sample_field(
             sample_list, treatment, "--treatment_map", required=require_treatment
         ),
@@ -253,11 +265,12 @@ def build_samples_df(
         "peak_bed": materialize_sample_field(
             sample_list, peak_bed, "--peak_bed_map", required=require_peak_bed
         ),
+        "regions_bed": materialize_sample_field(
+            sample_list, regions_bed, "--regions_bed_map", required=False
+        ),
         "genome": [genome] * len(sample_list),
         "species": [genome] * len(sample_list),
-        "dpos_xls": materialize_sample_field(
-            sample_list, dpos, "--dpos_map", required=False
-        ),
+        "dpos_xls": dpos_xls_final,
         "insertion_bw": materialize_sample_field(
             sample_list, insertion_bw, "--insertion_bw_map", required=False
         ),
@@ -270,6 +283,7 @@ def build_samples_df(
 
 def _normalize_token(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "", s).lower()
+
 
 def discover_danpos_position_file(nucleosome_out_dir: Path, sample: str) -> str:
     pooled = nucleosome_out_dir / "pooled"
@@ -327,6 +341,77 @@ def enrich_positions_from_nucleosome(samples: pd.DataFrame, nucleosome_out_dir: 
     return df
 
 
+def load_sample_list_from_cluster_tsv(cluster_tsv: str) -> List[str]:
+    path = Path(cluster_tsv)
+    if not path.exists():
+        raise PipelineError(f"Cluster TSV not found: {cluster_tsv}")
+    df = pd.read_csv(path, sep="\t", dtype=str).fillna("")
+    if "sample" not in df.columns:
+        raise PipelineError(f"'sample' column missing in cluster TSV: {cluster_tsv}")
+    samples = []
+    seen = set()
+    for s in df["sample"].astype(str).tolist():
+        s = s.strip()
+        if s and s not in seen:
+            seen.add(s)
+            samples.append(s)
+    if not samples:
+        raise PipelineError(f"No valid sample names found in cluster TSV: {cluster_tsv}")
+    return samples
+
+
+def prepare_motif_cluster_df(args, paths: Dict[str, Path]) -> pd.DataFrame:
+    motif_cluster_tsv = str(getattr(args, "motif_cluster_tsv", "") or "").strip()
+
+    if paths["cluster_sample_sheet"].exists():
+        if args.positions_map or args.dpos_map or args.insertion_bw_map or args.atac_bw_map:
+            update_cluster_sample_sheet_with_user_maps(args, paths)
+        return pd.read_csv(paths["cluster_sample_sheet"], sep="\t", dtype=str).fillna("")
+
+    if not motif_cluster_tsv:
+        raise PipelineError(
+            "Missing cluster_sample_sheet.tsv. Please run cluster first under the same --out_dir, "
+            "use the top-level run subcommand, or provide --motif_cluster_tsv together with the necessary sample maps."
+        )
+
+    sample_list = load_sample_list_from_cluster_tsv(motif_cluster_tsv)
+    samples = build_samples_df(
+        sample_list=sample_list,
+        atac_bw_map=getattr(args, "atac_bw_map", ""),
+        positions_map=getattr(args, "positions_map", ""),
+        dpos_map=getattr(args, "dpos_map", ""),
+        insertion_bw_map=getattr(args, "insertion_bw_map", ""),
+        genome=getattr(args, "genome", None),
+        genome_fasta=getattr(args, "genome_fasta", None),
+        chrom_sizes=getattr(args, "chrom_sizes", None),
+        annotation_gtf=getattr(args, "annotation_gtf", None),
+        require_atac_bw=False,
+        require_positions=False,
+        require_treatment=False,
+        require_peak_bed=False,
+        require_genome=False,
+    )
+
+    needs_dpos = samples["dpos_xls"].astype(str).str.strip() == ""
+    samples.loc[needs_dpos, "dpos_xls"] = samples.loc[needs_dpos, "positions_xls"]
+
+    needs_ins = samples["insertion_bw"].astype(str).str.strip() == ""
+    samples.loc[needs_ins, "insertion_bw"] = samples.loc[needs_ins, "atac_bw"]
+
+    cluster_df = pd.DataFrame({
+        "sample": samples["sample"].astype(str),
+        "atac_bw": samples["atac_bw"].astype(str),
+        "positions_xls": samples["positions_xls"].astype(str),
+        "dpos_xls": samples["dpos_xls"].astype(str),
+        "insertion_bw": samples["insertion_bw"].astype(str),
+    })
+
+    ensure_dir(paths["cluster_sample_sheet"].parent)
+    cluster_df.to_csv(paths["cluster_sample_sheet"], sep="\t", index=False)
+    eprint(f"[INFO] Autogenerated minimal cluster_sample_sheet for motif step: {paths['cluster_sample_sheet']}")
+    return cluster_df
+
+
 def discover_array_outputs(sample_out_dir: Path) -> Tuple[str, str, str]:
     meta = parse_kv_file(sample_out_dir / "run_metadata.txt")
     bed = meta.get("filtered_bed", "")
@@ -343,15 +428,51 @@ def discover_array_outputs(sample_out_dir: Path) -> Tuple[str, str, str]:
     return bed, stats, peak
 
 
-def build_cluster_sample_sheet(samples: pd.DataFrame, array_root: Path, out_path: Path) -> pd.DataFrame:
+def try_discover_array_outputs(sample_out_dir: Path) -> Tuple[str, str, str]:
+    if not sample_out_dir.exists():
+        return "", "", ""
+    try:
+        return discover_array_outputs(sample_out_dir)
+    except PipelineError:
+        return "", "", ""
+
+
+def build_cluster_sample_sheet(
+    samples: pd.DataFrame,
+    array_root: Path,
+    out_path: Path,
+    require_stats_tsv: bool = False,
+) -> pd.DataFrame:
     rows = []
+
     for row in samples.itertuples(index=False):
         sample = row.sample
         sample_dir = array_root / sample
-        bed, stats_tsv, peak_bed = discover_array_outputs(sample_dir)
+
+        explicit_regions_bed = str(getattr(row, "regions_bed", "") or "").strip()
+        explicit_peak_bed = str(getattr(row, "peak_bed", "") or "").strip()
+
+        disc_bed, disc_stats, disc_peak = try_discover_array_outputs(sample_dir)
+
+        regions_bed = explicit_regions_bed or disc_bed
+        stats_tsv = disc_stats
+        peak_bed = explicit_peak_bed or disc_peak
+
+        if not regions_bed:
+            raise PipelineError(
+                f"No regions_bed available for sample '{sample}'. "
+                f"Provide --regions_bed_map or ensure array outputs exist under: {sample_dir}"
+            )
+
+        if require_stats_tsv and not stats_tsv:
+            raise PipelineError(
+                f"stats_tsv is required for downstream describe step, but was not found for sample '{sample}'. "
+                f"Expected array outputs under: {sample_dir}"
+            )
+
         rows.append({
             "sample": sample,
-            "regions_bed": bed,
+            "regions_bed": regions_bed,
             "atac_bw": row.atac_bw,
             "stats_tsv": stats_tsv,
             "peak_bed": peak_bed,
@@ -418,6 +539,57 @@ def write_positions_sheet(samples: pd.DataFrame, path: Path):
 def require_file(path: Path, msg: str):
     if not path.exists():
         raise PipelineError(msg)
+
+
+def update_cluster_sample_sheet_with_user_maps(args, paths: Dict[str, Path]):
+    if not (args.positions_map or args.dpos_map or args.insertion_bw_map or args.atac_bw_map):
+        return
+
+    require_file(
+        paths["cluster_sample_sheet"],
+        "Missing cluster_sample_sheet.tsv. Please run cluster first under the same --out_dir, "
+        "or use the top-level run subcommand."
+    )
+
+    cluster_df = pd.read_csv(paths["cluster_sample_sheet"], sep="\t", dtype=str).fillna("")
+    if "sample" not in cluster_df.columns:
+        raise PipelineError(f"'sample' column missing in cluster_sample_sheet: {paths['cluster_sample_sheet']}")
+
+    sample_list = cluster_df["sample"].astype(str).tolist()
+
+    samples = build_samples_df(
+        sample_list=sample_list,
+        atac_bw_map=args.atac_bw_map,
+        positions_map=args.positions_map,
+        dpos_map=args.dpos_map,
+        insertion_bw_map=args.insertion_bw_map,
+        genome=args.genome,
+        genome_fasta=getattr(args, "genome_fasta", None),
+        chrom_sizes=args.chrom_sizes,
+        annotation_gtf=args.annotation_gtf,
+        require_atac_bw=False,
+        require_positions=False,
+        require_treatment=False,
+        require_peak_bed=False,
+        require_genome=False,
+    )
+
+    upd = cluster_df.merge(
+        samples[["sample", "positions_xls", "dpos_xls", "insertion_bw", "atac_bw"]],
+        on="sample",
+        how="left",
+        suffixes=("", ".new")
+    )
+
+    for col in ["positions_xls", "dpos_xls", "insertion_bw", "atac_bw"]:
+        new_col = f"{col}.new"
+        if new_col in upd.columns:
+            old = upd[col] if col in upd.columns else ""
+            upd[col] = upd[new_col].where(upd[new_col].astype(str).str.strip() != "", old)
+            upd = upd.drop(columns=[new_col])
+
+    upd.to_csv(paths["cluster_sample_sheet"], sep="\t", index=False)
+    eprint(f"[INFO] Updated cluster_sample_sheet with user-provided maps: {paths['cluster_sample_sheet']}")
 
 
 def run_nucleosome_step(args, samples: pd.DataFrame, paths: Dict[str, Path]):
@@ -538,8 +710,17 @@ def run_array_step(args, samples: pd.DataFrame, paths: Dict[str, Path], infer_fr
     return df
 
 
-def prepare_cluster_bundle(samples: pd.DataFrame, paths: Dict[str, Path]) -> pd.DataFrame:
-    cluster_df = build_cluster_sample_sheet(samples, paths["array_root"], paths["cluster_sample_sheet"])
+def prepare_cluster_bundle(
+    samples: pd.DataFrame,
+    paths: Dict[str, Path],
+    require_region_stats: bool = False,
+) -> pd.DataFrame:
+    cluster_df = build_cluster_sample_sheet(
+        samples,
+        paths["array_root"],
+        paths["cluster_sample_sheet"],
+        require_stats_tsv=require_region_stats,
+    )
 
     region_stats_df = cluster_df[["sample", "stats_tsv"]].copy()
     region_stats_df.to_csv(paths["region_stats_sheet"], sep="\t", index=False)
@@ -598,12 +779,20 @@ def run_describe_step(args, paths: Dict[str, Path], resolved_gtf: str, resolved_
         "--use_transcript_tss",
         bool_str(args.describe_use_transcript_tss),
     ]
+
     if getattr(args, "sample_order", None):
         cmd.extend(["--sample_order", args.sample_order])
+
     if resolved_ref_fa:
         cmd.extend(["--ref_fa", resolved_ref_fa])
-    if paths["peak_sheet"].exists():
-        cmd.extend(["--peak_sheet", str(paths["peak_sheet"])])
+
+    if getattr(args, "describe_skip_peak_module", False):
+        cmd.extend(["--skip_peak_module", "true"])
+    else:
+        if paths["peak_sheet"].exists():
+            cmd.extend(["--peak_sheet", str(paths["peak_sheet"])])
+            cmd.extend(["--peak_start_is_0based", bool_str(args.describe_peak_start_is_0based)])
+
     cmd.extend(shlex_list(args.describe_extra_args))
     run_cmd(cmd, paths["log_dir"] / "describe.log")
 
@@ -613,23 +802,28 @@ def run_describe_step(args, paths: Dict[str, Path], resolved_gtf: str, resolved_
     )
 
 
-def run_motif_step(args, paths: Dict[str, Path], resolved_annotation_gtf: str, resolved_chrom_sizes: str, resolved_genome: str):
-    require_file(
-        paths["cluster_sample_sheet"],
-        "Missing cluster_sample_sheet.tsv. Please run cluster subcommand first under the same --out_dir.",
-    )
-    cluster_df = pd.read_csv(paths["cluster_sample_sheet"], sep="\t", dtype=str).fillna("")
+def run_motif_step(
+    args,
+    paths: Dict[str, Path],
+    resolved_annotation_gtf: Optional[str],
+    resolved_chrom_sizes: str,
+    resolved_genome: str,
+):
+    cluster_df = prepare_motif_cluster_df(args, paths)
+
+    motif_cluster_tsv = str(getattr(args, "motif_cluster_tsv", "") or "").strip()
+    if motif_cluster_tsv and not Path(motif_cluster_tsv).exists():
+        raise PipelineError(f"--motif_cluster_tsv not found: {motif_cluster_tsv}")
+
+    if args.tss_near_bp >= 0 and not str(resolved_annotation_gtf or "").strip():
+        raise PipelineError("--annotation_gtf is required when --tss_near_bp >= 0 for motif step")
 
     ensure_dir(paths["motif_root"])
     cmd = [
         args.python,
         str(args.motif_script),
-        "--cluster_run_dir",
-        str(paths["cluster_root"]),
         "-O",
         str(paths["motif_root"]),
-        "--annotation_file",
-        resolved_annotation_gtf,
         "--chrom_sizes",
         resolved_chrom_sizes,
         "--genome",
@@ -640,30 +834,139 @@ def run_motif_step(args, paths: Dict[str, Path], resolved_annotation_gtf: str, r
         args.target_clusters,
         "--tss_near_bp",
         str(args.tss_near_bp),
+        "--min_n_target_arrays",
+        str(args.min_n_target_arrays),
+        "--bg_multiple",
+        str(args.bg_multiple),
+        "--bg_sampling_strategy",
+        args.bg_sampling_strategy,
+        "--threads",
+        str(args.threads),
+        "--homer_len",
+        args.homer_len,
     ]
+
+    motif_cluster_tsv = str(getattr(args, "motif_cluster_tsv", "") or "").strip()
+    if motif_cluster_tsv:
+        cmd.extend(["--cluster_tsv", motif_cluster_tsv])
+    else:
+        cmd.extend(["--cluster_run_dir", str(paths["cluster_root"])])
+
+    if str(resolved_annotation_gtf or "").strip():
+        cmd.extend(["--annotation_file", str(resolved_annotation_gtf).strip()])
+
+    if args.bg_match_location:
+        cmd.append("--bg_match_location")
+    else:
+        cmd.append("--no_bg_match_location")
 
     if args.homer_auto_bg:
         cmd.append("--homer_auto_bg")
+    else:
+        cmd.append("--no_homer_auto_bg")
+
+    if args.run_known_only:
+        cmd.append("--run_known_only")
+    else:
+        cmd.append("--run_denovo_too")
+
     if args.build_only:
         cmd.append("--build_only")
 
-    if args.motif_mode == "internal_linker":
-        dmap = {row["sample"]: row["dpos_xls"] for _, row in cluster_df.iterrows()}
-        dpos_map_str = ";".join(f"{k}={v}" for k, v in dmap.items())
-        cmd.extend(["--dpos_map", dpos_map_str])
-    else:
+    if str(args.extra_homer_args).strip():
+        cmd.extend(["--extra_homer_args", str(args.extra_homer_args).strip()])
+
+    mode_internal = args.motif_mode in ("both", "internal_linker", "all")
+    mode_edge_legacy = args.motif_mode == "edge"
+    mode_edge_outside = args.motif_mode in ("both", "edge_outside", "edge_both", "all")
+    mode_edge_inside = args.motif_mode in ("edge_inside", "edge_both", "all")
+    mode_edge_any = mode_edge_legacy or mode_edge_outside or mode_edge_inside
+
+    if mode_internal:
+        missing = cluster_df.loc[
+            cluster_df["dpos_xls"].astype(str).str.strip() == "",
+            "sample"
+        ].tolist()
+        if missing:
+            raise PipelineError(
+                "motif mode internal_linker/both/all requires positions_xls/dpos_xls for all samples. "
+                f"Missing in: {missing}. "
+                "Please provide --positions_map / --dpos_map, or run nucleosome first."
+            )
+
+        posmap = {row["sample"]: row["dpos_xls"] for _, row in cluster_df.iterrows()}
+        positions_map_str = ";".join(f"{k}={v}" for k, v in posmap.items())
+        cmd.extend([
+            "--positions_map", positions_map_str,
+            "--internal_region_mode", args.internal_region_mode,
+            "--nuc_core_half_bp", str(args.nuc_core_half_bp),
+            "--min_linker_len", str(args.min_linker_len),
+            "--internal_pad_bp", str(args.internal_pad_bp),
+            "--internal_nuc_pad_bp", str(args.internal_nuc_pad_bp),
+        ])
+
+        if not args.require_two_dyads_for_linker:
+            cmd.append("--allow_single_dyad_linker")
+
+    if mode_edge_any:
+        missing = cluster_df.loc[
+            cluster_df["insertion_bw"].astype(str).str.strip() == "",
+            "sample"
+        ].tolist()
+        if missing:
+            raise PipelineError(
+                "motif mode edge/edge_outside/edge_inside/edge_both/all requires insertion_bw for all samples. "
+                f"Missing in: {missing}. "
+                "Please provide --insertion_bw_map or make sure atac_bw/insertion_bw has been written into cluster_sample_sheet."
+            )
+
         imap = {row["sample"]: row["insertion_bw"] for _, row in cluster_df.iterrows()}
         ins_bw_map_str = ";".join(f"{k}={v}" for k, v in imap.items())
         cmd.extend([
-            "--ins_bw_map",
-            ins_bw_map_str,
-            "--cluster_dir_default",
-            args.cluster_dir_default,
-            "--rel_range",
-            args.rel_range,
+            "--ins_bw_map", ins_bw_map_str,
+            "--cluster_dir_default", args.cluster_dir_default,
+            "--score_flank_bp", str(args.score_flank_bp),
+            "--score_edge_bp", str(args.score_edge_bp),
+            "--q_keep", str(args.q_keep),
+            "--range_offset_bp", str(args.range_offset_bp),
         ])
+
         if args.cluster_dir_map:
             cmd.extend(["--cluster_dir_map", args.cluster_dir_map])
+
+        if not args.require_positive_score:
+            cmd.append("--allow_nonpositive_score")
+
+        if not args.strict_outside_only:
+            cmd.append("--allow_inside_overlap")
+
+    if mode_edge_legacy:
+        cmd.extend([
+            "--motif_outside_bp", str(args.motif_outside_bp),
+            "--motif_inside_bp", str(args.motif_inside_bp),
+        ])
+        if args.rel_range is not None and str(args.rel_range).strip() != "":
+            cmd.append(f"--rel_range={str(args.rel_range).strip()}")
+
+    if mode_edge_outside:
+        cmd.extend([
+            "--outside_start_bp", str(args.outside_start_bp),
+            "--outside_end_bp", str(args.outside_end_bp),
+            "--outside_num_bins", str(args.outside_num_bins),
+        ])
+        if args.rel_range is not None and str(args.rel_range).strip() != "":
+            cmd.append(f"--rel_range={str(args.rel_range).strip()}")
+
+    if mode_edge_inside:
+        cmd.extend([
+            "--inside_start_rel", str(args.inside_start_rel),
+            "--inside_end_rel", str(args.inside_end_rel),
+            "--inside_num_bins", str(args.inside_num_bins),
+        ])
+        if args.inside_clip_to_array:
+            cmd.append("--inside_clip_to_array")
+        if args.inside_rel_range is not None and str(args.inside_rel_range).strip() != "":
+            cmd.append(f"--inside_rel_range={str(args.inside_rel_range).strip()}")
 
     cmd.extend(shlex_list(args.motif_extra_args))
     run_cmd(cmd, paths["log_dir"] / "motif.log")
@@ -731,15 +1034,36 @@ def add_common_sample_args(p):
     p.add_argument("--treatment_map", default="", help="sample=/path/to/treatment.bam;...")
     p.add_argument("--control_map", default="", help="sample=/path/to/control.bam;... optional")
     p.add_argument("--peak_bed_map", default="", help="sample=/path/to/peak.bed;... used when --peak_mode existing")
-    p.add_argument("--dpos_map", default="", help="sample=/path/to/dpos_or_positions.xls;... optional")
+    p.add_argument(
+        "--regions_bed_map",
+        default="",
+        help="sample=/path/to/well_phased_array.bed;... optional. "
+             "If provided, cluster step will use these region BEDs directly instead of discovering them from 01_array_call"
+    )
+    p.add_argument(
+        "--dpos_map",
+        default="",
+        help="Backward-compatible alias of position map for motif/internal-linker related steps, e.g. sample=/path/to/positions.xls;..."
+    )
     p.add_argument("--insertion_bw_map", default="", help="sample=/path/to/insertion.bw;... optional")
+
+
+def add_motif_override_map_args(p):
+    p.add_argument("--atac_bw_map", default="", help="Optional sample map used to backfill insertion_bw in existing cluster_sample_sheet.")
+    p.add_argument("--positions_map", default="", help="Optional sample map for positions.xls when running standalone motif.")
+    p.add_argument("--dpos_map", default="", help="Backward-compatible alias for positions map when running standalone motif.")
+    p.add_argument("--insertion_bw_map", default="", help="Optional sample map for insertion bigWig when running standalone motif.")
 
 
 def add_common_reference_args(p):
     p.add_argument("--genome", default=None, help="Shared genome for all samples, e.g. hg38 or mm10")
     p.add_argument("--genome_fasta", default=None, help="Shared reference FASTA")
     p.add_argument("--chrom_sizes", default=None, help="Shared chrom sizes file")
-    p.add_argument("--annotation_gtf", default=None, help="Shared annotation file for both describe and motif steps")
+    p.add_argument(
+        "--annotation_gtf",
+        default=None,
+        help="Shared annotation file. Required for describe, and required for motif only when --tss_near_bp >= 0"
+    )
 
 
 def add_sample_order_arg(p):
@@ -772,17 +1096,128 @@ def add_cluster_args(p):
 def add_describe_args(p):
     p.add_argument("--describe_use_transcript_tss", action="store_true", default=True)
     p.add_argument("--describe_gene_tss", dest="describe_use_transcript_tss", action="store_false")
+    p.add_argument("--describe_skip_peak_module", action="store_true", default=False)
+    p.add_argument(
+        "--describe_peak_start_is_0based",
+        dest="describe_peak_start_is_0based",
+        action="store_true",
+        default=True,
+        help="Pass --peak_start_is_0based true to describe_array_subtype.R",
+    )
+    p.add_argument(
+        "--describe_peak_start_is_1based",
+        dest="describe_peak_start_is_0based",
+        action="store_false",
+        help="Pass --peak_start_is_0based false to describe_array_subtype.R",
+    )
     p.add_argument("--describe_extra_args", default="", help="Extra arguments passed to describe_array_subtype.R")
 
 
 def add_motif_args(p):
-    p.add_argument("--motif_mode", choices=["internal_linker", "edge_outside"], default="internal_linker")
+    p.add_argument(
+        "--motif_mode",
+        choices=["both", "internal_linker", "edge", "edge_outside", "edge_inside", "edge_both", "all"],
+        default="edge",
+        help="Motif region mode. 'edge' is the legacy boundary-centered mode used by the updated motif script."
+    )
+    p.add_argument(
+        "--motif_cluster_tsv",
+        default=None,
+        help="Optional explicit cluster assignment TSV for motif step. If provided, it overrides automatic discovery from <out_dir>/02_cluster."
+    )
     p.add_argument("--target_clusters", default="ALL")
-    p.add_argument("--tss_near_bp", type=int, default=3000)
+    p.add_argument(
+        "--tss_near_bp",
+        type=int,
+        default=-1,
+        help="TSS filter window size. Use -1 to disable TSS filtering entirely; use 0 to require exact TSS overlap."
+    )
+    p.add_argument("--min_n_target_arrays", type=int, default=30)
+    p.add_argument("--bg_multiple", type=float, default=2.0)
+    p.add_argument("--bg_match_location", dest="bg_match_location", action="store_true", default=True)
+    p.add_argument("--no_bg_match_location", dest="bg_match_location", action="store_false")
+    p.add_argument("--bg_sampling_strategy", choices=["per_bin", "shared"], default="per_bin")
+
+    p.add_argument(
+        "--internal_region_mode",
+        choices=["linker", "nucleosome", "both"],
+        default="linker",
+        help="For internal_linker/both/all motif modes, use linker only, nucleosome only, or both inside arrays."
+    )
+    p.add_argument(
+        "--nuc_core_half_bp",
+        type=int,
+        default=70,
+        help="Half-width of nucleosome core used for internal region construction."
+    )
+    p.add_argument(
+        "--min_linker_len",
+        type=int,
+        default=20,
+        help="Minimum linker length to keep in internal region construction."
+    )
+    p.add_argument(
+        "--internal_pad_bp",
+        type=int,
+        default=0,
+        help="Pad each internal linker segment on both sides by this many bp."
+    )
+    p.add_argument(
+        "--internal_nuc_pad_bp",
+        type=int,
+        default=0,
+        help="Pad each internal nucleosome segment on both sides by this many bp."
+    )
+    p.add_argument(
+        "--require_two_dyads_for_linker",
+        dest="require_two_dyads_for_linker",
+        action="store_true",
+        default=True,
+        help="Require at least two dyads within an array to define internal linkers."
+    )
+    p.add_argument(
+        "--allow_single_dyad_linker",
+        dest="require_two_dyads_for_linker",
+        action="store_false",
+        help="Allow linker extraction from arrays with a single dyad."
+    )
+
     p.add_argument("--cluster_dir_default", choices=["neutral", "inside_low", "inside_high"], default="neutral")
     p.add_argument("--cluster_dir_map", default=None, help="Example: C1=inside_low;C2=neutral")
-    p.add_argument("--rel_range", default="+275:+475")
-    p.add_argument("--homer_auto_bg", action="store_true", default=False)
+
+    p.add_argument("--score_flank_bp", type=int, default=800)
+    p.add_argument("--score_edge_bp", type=int, default=200)
+
+    p.add_argument("--motif_outside_bp", type=int, default=375)
+    p.add_argument("--motif_inside_bp", type=int, default=275)
+    p.add_argument("--range_offset_bp", type=int, default=70)
+
+    p.add_argument("--outside_start_bp", type=int, default=75)
+    p.add_argument("--outside_end_bp", type=int, default=675)
+    p.add_argument("--outside_num_bins", type=int, default=3)
+
+    p.add_argument("--inside_start_rel", type=int, default=-475)
+    p.add_argument("--inside_end_rel", type=int, default=-75)
+    p.add_argument("--inside_num_bins", type=int, default=2)
+    p.add_argument("--inside_clip_to_array", action="store_true", default=False)
+
+    p.add_argument("--q_keep", type=float, default=0.95)
+
+    p.add_argument("--require_positive_score", dest="require_positive_score", action="store_true", default=True)
+    p.add_argument("--allow_nonpositive_score", dest="require_positive_score", action="store_false")
+
+    p.add_argument("--strict_outside_only", dest="strict_outside_only", action="store_true", default=True)
+    p.add_argument("--allow_inside_overlap", dest="strict_outside_only", action="store_false")
+
+    p.add_argument("--rel_range", default=None, help="Boundary-relative range(s). For multiple bins, separate by semicolon.")
+    p.add_argument("--inside_rel_range", default=None, help="Compatibility argument for edge_inside mode.")
+    p.add_argument("--homer_auto_bg", dest="homer_auto_bg", action="store_true", default=True)
+    p.add_argument("--no_homer_auto_bg", dest="homer_auto_bg", action="store_false")
+    p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--homer_len", default="8,10,12,15,20")
+    p.add_argument("--run_known_only", dest="run_known_only", action="store_true", default=True)
+    p.add_argument("--run_denovo_too", dest="run_known_only", action="store_false")
+    p.add_argument("--extra_homer_args", default="", help="Extra arguments forwarded to HOMER by run_array_motif_enrichment.py")
     p.add_argument("--build_only", action="store_true", default=False)
     p.add_argument("--motif_extra_args", default="", help="Extra arguments passed to run_array_motif_enrichment.py")
 
@@ -861,6 +1296,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_motif = sub.add_parser("motif", help="Run motif enrichment step")
     add_common_io_args(p_motif)
     add_common_tool_args(p_motif)
+    add_motif_override_map_args(p_motif)
     add_common_reference_args(p_motif)
     add_motif_args(p_motif)
 
@@ -927,6 +1363,7 @@ def handle_run(args):
         treatment_map=args.treatment_map,
         control_map=args.control_map,
         peak_bed_map=args.peak_bed_map,
+        regions_bed_map=args.regions_bed_map,
         dpos_map=args.dpos_map,
         insertion_bw_map=args.insertion_bw_map,
         genome=args.genome,
@@ -952,10 +1389,27 @@ def handle_run(args):
         samples = run_array_step(args, samples, paths, infer_from_nucleosome=True)
 
     if "cluster" in steps:
-        if (samples["positions_xls"].astype(str).str.strip() == "").any():
+        needs_dpos = samples["dpos_xls"].astype(str).str.strip() == ""
+        samples.loc[needs_dpos, "dpos_xls"] = samples.loc[needs_dpos, "positions_xls"]
+
+        need_dpos_for_downstream = (
+            "motif" in steps and args.motif_mode in ("both", "internal_linker", "all")
+        )
+        if need_dpos_for_downstream and (samples["dpos_xls"].astype(str).str.strip() == "").any():
             samples = enrich_positions_from_nucleosome(samples, paths["nucleosome_root"])
-            write_positions_sheet(samples, paths["positions_sample_sheet"])
-        prepare_cluster_bundle(samples, paths)
+
+        needs_dpos = samples["dpos_xls"].astype(str).str.strip() == ""
+        samples.loc[needs_dpos, "dpos_xls"] = samples.loc[needs_dpos, "positions_xls"]
+
+        needs_ins = samples["insertion_bw"].astype(str).str.strip() == ""
+        samples.loc[needs_ins, "insertion_bw"] = samples.loc[needs_ins, "atac_bw"]
+
+        write_positions_sheet(samples, paths["positions_sample_sheet"])
+        prepare_cluster_bundle(
+            samples,
+            paths,
+            require_region_stats=("describe" in steps),
+        )
         run_cluster_step(args, paths)
 
     tss_anno_tsv = args.tss_anno_tsv
@@ -967,15 +1421,26 @@ def handle_run(args):
         tss_anno_tsv = run_describe_step(args, paths, resolved_gtf, resolved_ref_fa)
 
     if "motif" in steps:
+        if "cluster" not in steps:
+            if paths["cluster_sample_sheet"].exists():
+                update_cluster_sample_sheet_with_user_maps(args, paths)
+            elif not str(getattr(args, "motif_cluster_tsv", "") or "").strip():
+                raise PipelineError(
+                    "Missing cluster_sample_sheet.tsv. Please run cluster first under the same --out_dir, "
+                    "or provide --motif_cluster_tsv together with motif sample maps."
+                )
+
         resolved_annotation_gtf = resolve_shared_value(args.annotation_gtf, samples, "annotation_gtf")
         resolved_chrom_sizes = resolve_shared_value(args.chrom_sizes, samples, "chrom_sizes")
         resolved_genome = resolve_shared_value(args.genome, samples, "genome")
-        if not resolved_annotation_gtf:
-            raise PipelineError("--annotation_gtf is required when running motif")
+
+        if args.tss_near_bp >= 0 and not resolved_annotation_gtf:
+            raise PipelineError("--annotation_gtf is required when running motif with --tss_near_bp >= 0")
         if not resolved_chrom_sizes:
             raise PipelineError("--chrom_sizes is required when running motif")
         if not resolved_genome:
             raise PipelineError("--genome is required when running motif")
+
         run_motif_step(args, paths, resolved_annotation_gtf, resolved_chrom_sizes, resolved_genome)
 
     if "score" in steps:
@@ -998,6 +1463,43 @@ def handle_run(args):
         ("score_root", str(paths["score_root"])),
         ("positions_sample_sheet", str(paths["positions_sample_sheet"]) if paths["positions_sample_sheet"].exists() else ""),
         ("cluster_sample_sheet", str(paths["cluster_sample_sheet"]) if paths["cluster_sample_sheet"].exists() else ""),
+        ("peak_sheet", str(paths["peak_sheet"]) if paths["peak_sheet"].exists() else ""),
+        ("describe_skip_peak_module", str(bool(getattr(args, "describe_skip_peak_module", False))).lower()),
+        ("describe_peak_start_is_0based", str(bool(getattr(args, "describe_peak_start_is_0based", True))).lower()),
+        ("motif_mode", str(args.motif_mode)),
+        ("motif_cluster_tsv", str(getattr(args, "motif_cluster_tsv", "") or "")),
+        ("min_n_target_arrays", str(args.min_n_target_arrays)),
+        ("bg_multiple", str(args.bg_multiple)),
+        ("bg_match_location", str(bool(args.bg_match_location)).lower()),
+        ("bg_sampling_strategy", str(args.bg_sampling_strategy)),
+        ("internal_region_mode", str(args.internal_region_mode)),
+        ("nuc_core_half_bp", str(args.nuc_core_half_bp)),
+        ("min_linker_len", str(args.min_linker_len)),
+        ("internal_pad_bp", str(args.internal_pad_bp)),
+        ("internal_nuc_pad_bp", str(args.internal_nuc_pad_bp)),
+        ("require_two_dyads_for_linker", str(bool(args.require_two_dyads_for_linker)).lower()),
+        ("cluster_dir_default", str(args.cluster_dir_default)),
+        ("cluster_dir_map", str(args.cluster_dir_map or "")),
+        ("score_flank_bp", str(args.score_flank_bp)),
+        ("score_edge_bp", str(args.score_edge_bp)),
+        ("motif_outside_bp", str(args.motif_outside_bp)),
+        ("motif_inside_bp", str(args.motif_inside_bp)),
+        ("range_offset_bp", str(args.range_offset_bp)),
+        ("q_keep", str(args.q_keep)),
+        ("tss_near_bp", str(args.tss_near_bp)),
+        ("outside_start_bp", str(args.outside_start_bp)),
+        ("outside_end_bp", str(args.outside_end_bp)),
+        ("outside_num_bins", str(args.outside_num_bins)),
+        ("inside_start_rel", str(args.inside_start_rel)),
+        ("inside_end_rel", str(args.inside_end_rel)),
+        ("inside_num_bins", str(args.inside_num_bins)),
+        ("inside_clip_to_array", str(bool(args.inside_clip_to_array)).lower()),
+        ("rel_range", str(args.rel_range or "")),
+        ("inside_rel_range", str(args.inside_rel_range or "")),
+        ("homer_auto_bg", str(bool(args.homer_auto_bg)).lower()),
+        ("threads", str(args.threads)),
+        ("homer_len", str(args.homer_len)),
+        ("run_known_only", str(bool(args.run_known_only)).lower()),
         ("tss_anno_tsv", str(tss_anno_tsv) if tss_anno_tsv else ""),
     ]
     write_pipeline_metadata(paths["pipeline_metadata"], metadata_rows)
@@ -1050,6 +1552,7 @@ def handle_cluster(args):
         sample_list=sample_list,
         atac_bw_map=args.atac_bw_map,
         positions_map=args.positions_map,
+        regions_bed_map=args.regions_bed_map,
         dpos_map=args.dpos_map,
         insertion_bw_map=args.insertion_bw_map,
         require_atac_bw=True,
@@ -1060,15 +1563,14 @@ def handle_cluster(args):
     ensure_standard_dirs(paths)
     resolve_tool_paths(args)
 
-    if (samples["positions_xls"].astype(str).str.strip() == "").any():
-        samples = enrich_positions_from_nucleosome(samples, paths["nucleosome_root"])
     needs_dpos = samples["dpos_xls"].astype(str).str.strip() == ""
     samples.loc[needs_dpos, "dpos_xls"] = samples.loc[needs_dpos, "positions_xls"]
+
     needs_ins = samples["insertion_bw"].astype(str).str.strip() == ""
     samples.loc[needs_ins, "insertion_bw"] = samples.loc[needs_ins, "atac_bw"]
 
     write_positions_sheet(samples, paths["positions_sample_sheet"])
-    prepare_cluster_bundle(samples, paths)
+    prepare_cluster_bundle(samples, paths, require_region_stats=False)
     run_cluster_step(args, paths)
 
 
@@ -1096,17 +1598,25 @@ def handle_motif(args):
     ensure_standard_dirs(paths)
     resolve_tool_paths(args)
 
-    if not args.annotation_gtf:
-        raise PipelineError("--annotation_gtf is required for motif subcommand")
+    if args.tss_near_bp >= 0 and not args.annotation_gtf:
+        raise PipelineError("--annotation_gtf is required for motif subcommand when --tss_near_bp >= 0")
     if not args.chrom_sizes:
         raise PipelineError("--chrom_sizes is required for motif subcommand")
     if not args.genome:
         raise PipelineError("--genome is required for motif subcommand")
 
+    if paths["cluster_sample_sheet"].exists():
+        update_cluster_sample_sheet_with_user_maps(args, paths)
+    elif not str(getattr(args, "motif_cluster_tsv", "") or "").strip():
+        raise PipelineError(
+            "Missing cluster_sample_sheet.tsv. Please run cluster first under the same --out_dir, "
+            "or provide --motif_cluster_tsv together with motif sample maps."
+        )
+
     run_motif_step(
         args,
         paths,
-        resolved_annotation_gtf=str(args.annotation_gtf),
+        resolved_annotation_gtf=str(args.annotation_gtf or ""),
         resolved_chrom_sizes=str(args.chrom_sizes),
         resolved_genome=str(args.genome),
     )
@@ -1123,9 +1633,12 @@ def handle_score(args):
 
     tss_anno_tsv = args.tss_anno_tsv
     if not tss_anno_tsv:
-        inferred = paths["describe_root"] / "03_TSS_annotation" / "region_TSS_association.detail.transcriptTSS.tsv"
-        if inferred.exists():
-            tss_anno_tsv = str(inferred)
+        inferred_tx = paths["describe_root"] / "03_TSS_annotation" / "region_TSS_association.detail.transcriptTSS.tsv"
+        inferred_gene = paths["describe_root"] / "03_TSS_annotation" / "region_TSS_association.detail.geneTSS.tsv"
+        if inferred_tx.exists():
+            tss_anno_tsv = str(inferred_tx)
+        elif inferred_gene.exists():
+            tss_anno_tsv = str(inferred_gene)
         else:
             raise PipelineError(
                 "--tss_anno_tsv is required for score subcommand unless describe output already exists"

@@ -20,13 +20,9 @@ def need_cmd(cmd: str) -> str:
         raise RuntimeError(f"Required command not found in PATH: {cmd}")
     return path
 
+
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
-
-
-def get_env(key: str, default: str = "") -> str:
-    v = os.getenv(key, default)
-    return v if v is not None and str(v).strip() != "" else default
 
 
 def parse_csv(x: str):
@@ -101,22 +97,6 @@ def open_text_auto(path: str):
 
 
 def read_tss_as_windows(annotation_path: str, tss_near_bp: int, chrlen: dict):
-    """
-    Supports:
-      - BED / BED.gz
-      - GTF / GTF.gz
-
-    BED handling:
-      - BED6 with strand: '+' => TSS=start, '-' => TSS=end-1
-      - 1bp BED: use that base as TSS
-      - generic BED without strand: use interval center
-
-    GTF handling:
-      - prefer feature == transcript
-      - if no transcript rows are found, fallback to feature == gene
-      - coordinates in GTF are 1-based inclusive
-      - '+' => TSS=start, '-' => TSS=end
-    """
     intervals = defaultdict(list)
     path_lower = str(annotation_path).lower()
     is_gtf = path_lower.endswith(".gtf") or path_lower.endswith(".gtf.gz")
@@ -290,8 +270,18 @@ def subtract_interval_by_merged(span_s, span_e, merged_intervals):
     return [(int(s), int(e)) for s, e in out if e > s]
 
 
-def linker_segments_for_region(chrom, start0, end1, region_id, chr_to_dyads, mask_intervals_by_chr,
-                               require_two_dyads=True, min_linker_len=20, pad_bp=0, chrlen=None):
+def linker_segments_for_region(
+    chrom,
+    start0,
+    end1,
+    region_id,
+    chr_to_dyads,
+    mask_intervals_by_chr,
+    require_two_dyads=True,
+    min_linker_len=20,
+    pad_bp=0,
+    chrlen=None,
+):
     dy = chr_to_dyads.get(chrom)
     if dy is None or dy.size == 0:
         return []
@@ -334,13 +324,112 @@ def linker_segments_for_region(chrom, start0, end1, region_id, chr_to_dyads, mas
     for s, e in final:
         if (e - s) >= int(min_linker_len):
             seg_idx += 1
-            out.append((chrom, int(s), int(e), f"{region_id}|seg{seg_idx:04d}"))
+            out.append((chrom, int(s), int(e), f"{region_id}|linker{seg_idx:04d}"))
+    return out
+
+
+def nucleosome_segments_for_region(
+    chrom,
+    start0,
+    end1,
+    region_id,
+    chr_to_dyads,
+    core_half_bp=70,
+    pad_bp=0,
+    chrlen=None,
+):
+    dy = chr_to_dyads.get(chrom)
+    if dy is None or dy.size == 0:
+        return []
+
+    left_idx = int(np.searchsorted(dy, int(start0), side="left"))
+    right_idx = int(np.searchsorted(dy, int(end1), side="left"))
+    n_dyads = right_idx - left_idx
+    if n_dyads <= 0:
+        return []
+
+    intervals = []
+    L = chrlen[chrom]
+    for d in dy[left_idx:right_idx]:
+        s = max(0, int(d) - int(core_half_bp) - int(pad_bp))
+        e = min(L, int(d) + int(core_half_bp) + 1 + int(pad_bp))
+
+        if s < int(start0):
+            s = int(start0)
+        if e > int(end1):
+            e = int(end1)
+
+        if e > s:
+            intervals.append((s, e))
+
+    intervals = merge_intervals(intervals)
+
+    out = []
+    seg_idx = 0
+    for s, e in intervals:
+        if e > s:
+            seg_idx += 1
+            out.append((chrom, int(s), int(e), f"{region_id}|nuc{seg_idx:04d}"))
+    return out
+
+
+def internal_segments_for_region(
+    chrom,
+    start0,
+    end1,
+    region_id,
+    chr_to_dyads,
+    mask_intervals_by_chr,
+    internal_region_mode="linker",
+    require_two_dyads=True,
+    min_linker_len=20,
+    linker_pad_bp=0,
+    nuc_core_half_bp=70,
+    nuc_pad_bp=0,
+    chrlen=None,
+):
+    mode = str(internal_region_mode).strip().lower()
+    if mode not in ("linker", "nucleosome", "both"):
+        raise RuntimeError(f"Unknown --internal_region_mode: {internal_region_mode}")
+
+    out = []
+
+    if mode in ("linker", "both"):
+        out.extend(
+            linker_segments_for_region(
+                chrom=chrom,
+                start0=start0,
+                end1=end1,
+                region_id=region_id,
+                chr_to_dyads=chr_to_dyads,
+                mask_intervals_by_chr=mask_intervals_by_chr,
+                require_two_dyads=require_two_dyads,
+                min_linker_len=min_linker_len,
+                pad_bp=linker_pad_bp,
+                chrlen=chrlen,
+            )
+        )
+
+    if mode in ("nucleosome", "both"):
+        out.extend(
+            nucleosome_segments_for_region(
+                chrom=chrom,
+                start0=start0,
+                end1=end1,
+                region_id=region_id,
+                chr_to_dyads=chr_to_dyads,
+                core_half_bp=nuc_core_half_bp,
+                pad_bp=nuc_pad_bp,
+                chrlen=chrlen,
+            )
+        )
+
     return out
 
 
 def sample_background_regions(bg_df: pd.DataFrame, tar_df: pd.DataFrame, n_need: int, match_location: bool, seed=1):
     rng = np.random.default_rng(seed)
-    if bg_df.shape[0] == 0:
+    if bg_df.shape[0] == 0 or int(n_need) <= 0:
         return bg_df.iloc[0:0].copy()
 
     if (not match_location) or ("location" not in bg_df.columns) or ("location" not in tar_df.columns):
@@ -387,17 +476,6 @@ def write_bed(df_bed: pd.DataFrame, out_bed: str):
     df_bed.to_csv(out_bed, sep="\t", index=False, header=False)
 
 
-def parse_rel_range(s: str):
-    s = (s or "").strip()
-    if s == "":
-        return None
-    for sep in [":", ","]:
-        if sep in s:
-            a, b = s.split(sep, 1)
-            return int(a.strip()), int(b.strip())
-    raise RuntimeError(f"Invalid REL_RANGE={s}")
-
-
 def clip_1based_inclusive(chr_arr, st1, en1, chrlen):
     out_st1 = np.array(st1, dtype=np.int64, copy=True)
     out_en1 = np.array(en1, dtype=np.int64, copy=True)
@@ -438,12 +516,80 @@ def make_edge_windows(start0, end1, flank_bp, edge_bp):
     outR_en1 = summit_R + flank_bp
 
     return (
-        summit_L, summit_R,
-        outL_st1, outL_en1,
-        inL_st1, inL_en1,
-        inR_st1, inR_en1,
-        outR_st1, outR_en1
+        summit_L,
+        summit_R,
+        outL_st1,
+        outL_en1,
+        inL_st1,
+        inL_en1,
+        inR_st1,
+        inR_en1,
+        outR_st1,
+        outR_en1,
     )
+
+
+def make_motif_window_1based(summit_1based, side, outside_bp, inside_bp):
+    if side == "L":
+        st1 = summit_1based - outside_bp
+        en1 = summit_1based + inside_bp
+    else:
+        st1 = summit_1based - inside_bp
+        en1 = summit_1based + outside_bp
+    return st1, en1
+
+
+def parse_single_rel_range(s: str):
+    s = (s or "").strip()
+    if s == "":
+        return None
+    for sep in [":", ","]:
+        if sep in s:
+            a, b = s.split(sep, 1)
+            try:
+                return int(a.strip()), int(b.strip())
+            except Exception:
+                raise RuntimeError(f"Invalid relative range '{s}'. Use like '+275:+475' or '-200:+300'.")
+    raise RuntimeError(f"Invalid relative range '{s}'. Use like '+275:+475' or '-200:+300'.")
+
+
+def parse_rel_range_list(x: str):
+    s = str(x or "").strip()
+    if s == "":
+        return []
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    out = []
+    for i, p in enumerate(parts, start=1):
+        rr = parse_single_rel_range(p)
+        if rr is None:
+            continue
+        out.append((i, rr[0], rr[1], p))
+    return out
+
+
+def shift_rel_coord_away_from_zero(x: int, offset_bp: int, partner: int | None = None):
+    x = int(x)
+    off = abs(int(offset_bp))
+    if off == 0:
+        return x
+    if x < 0:
+        return x - off
+    if x > 0:
+        return x + off
+    if partner is None:
+        return 0
+    partner = int(partner)
+    if partner < 0:
+        return -off
+    if partner > 0:
+        return off
+    return 0
+
+
+def shift_rel_range(rel_a: int, rel_b: int, offset_bp: int):
+    a = shift_rel_coord_away_from_zero(rel_a, offset_bp, partner=rel_b)
+    b = shift_rel_coord_away_from_zero(rel_b, offset_bp, partner=rel_a)
+    return int(a), int(b)
 
 
 def make_motif_window_1based_relative(summit_1based: int, side: str, rel_a: int, rel_b: int):
@@ -463,6 +609,135 @@ def make_motif_window_1based_relative(summit_1based: int, side: str, rel_a: int,
     return st1, en1
 
 
+def build_equal_distance_bins(start_bp: int, end_bp: int, num_bins: int):
+    start_bp = int(start_bp)
+    end_bp = int(end_bp)
+    num_bins = int(num_bins)
+
+    if num_bins < 1:
+        raise RuntimeError("--outside_num_bins must be >= 1")
+    if start_bp <= 0:
+        raise RuntimeError("--outside_start_bp must be > 0")
+    if end_bp <= start_bp:
+        raise RuntimeError("--outside_end_bp must be > --outside_start_bp")
+
+    cuts = np.linspace(start_bp, end_bp, num_bins + 1)
+    cuts = np.rint(cuts).astype(int)
+    cuts[0] = start_bp
+    cuts[-1] = end_bp
+
+    for i in range(1, len(cuts)):
+        if cuts[i] <= cuts[i - 1]:
+            cuts[i] = cuts[i - 1] + 1
+
+    bins = []
+    for i in range(num_bins):
+        a = int(cuts[i])
+        b = int(cuts[i + 1])
+        if b <= a:
+            raise RuntimeError(f"Invalid outside-bin construction: bin{i+1} has non-positive width ({a}, {b})")
+        label = f"bin{i+1}_{a}to{b}"
+        bins.append((i + 1, a, b, label))
+    return bins
+
+
+def build_equal_distance_bins_rel(start_rel: int, end_rel: int, num_bins: int, err_prefix: str = "range"):
+    start_rel = int(start_rel)
+    end_rel = int(end_rel)
+    num_bins = int(num_bins)
+
+    if num_bins < 1:
+        raise RuntimeError(f"--{err_prefix}_num_bins must be >= 1")
+    if end_rel <= start_rel:
+        raise RuntimeError(f"--{err_prefix}_end_rel must be > --{err_prefix}_start_rel")
+
+    cuts = np.linspace(start_rel, end_rel, num_bins + 1)
+    cuts = np.rint(cuts).astype(int)
+    cuts[0] = start_rel
+    cuts[-1] = end_rel
+
+    for i in range(1, len(cuts)):
+        if cuts[i] <= cuts[i - 1]:
+            cuts[i] = cuts[i - 1] + 1
+
+    bins = []
+    for i in range(num_bins):
+        a = int(cuts[i])
+        b = int(cuts[i + 1])
+        if b <= a:
+            raise RuntimeError(f"Invalid {err_prefix}-bin construction: bin{i+1} has non-positive width ({a}, {b})")
+        label = f"bin{i+1}_{a}to{b}"
+        bins.append((i + 1, a, b, label))
+    return bins
+
+
+def build_windows_from_best_side(meta_df: pd.DataFrame, rel_a: int, rel_b: int, chrlen: dict, clip_to_array: bool = False):
+    if meta_df.shape[0] == 0:
+        return meta_df.iloc[0:0].copy(), pd.DataFrame(columns=["chr", "start0", "end1", "id"])
+
+    arr_chr = meta_df["chr"].astype(str).to_numpy()
+    arr_side = meta_df["best_side"].astype(str).to_numpy()
+    arr_summit = meta_df["best_summit_1based"].to_numpy(dtype=np.int64)
+
+    st1 = np.zeros(arr_summit.shape[0], dtype=np.int64)
+    en1 = np.zeros(arr_summit.shape[0], dtype=np.int64)
+    for i in range(arr_summit.size):
+        s1, e1 = make_motif_window_1based_relative(int(arr_summit[i]), arr_side[i], int(rel_a), int(rel_b))
+        st1[i] = s1
+        en1[i] = e1
+
+    ok = np.ones(arr_summit.shape[0], dtype=bool)
+    st1c = np.array(st1, dtype=np.int64, copy=True)
+    en1c = np.array(en1, dtype=np.int64, copy=True)
+
+    if clip_to_array:
+        if ("start" not in meta_df.columns) or ("end" not in meta_df.columns):
+            raise RuntimeError("meta_df must contain start/end columns when clip_to_array=True")
+        arr_start0 = meta_df["start"].to_numpy(dtype=np.int64)
+        arr_end1 = meta_df["end"].to_numpy(dtype=np.int64)
+    else:
+        arr_start0 = None
+        arr_end1 = None
+
+    for i, c in enumerate(arr_chr):
+        L = chrlen.get(c)
+        if L is None:
+            ok[i] = False
+            continue
+
+        s = int(st1c[i])
+        e = int(en1c[i])
+
+        if s < 1:
+            s = 1
+        if e > L:
+            e = L
+
+        if clip_to_array:
+            arr_lo = int(arr_start0[i]) + 1
+            arr_hi = int(arr_end1[i])
+            if s < arr_lo:
+                s = arr_lo
+            if e > arr_hi:
+                e = arr_hi
+
+        if s > e:
+            ok[i] = False
+            continue
+
+        st1c[i] = s
+        en1c[i] = e
+
+    keep = meta_df.iloc[np.where(ok)[0]].copy()
+    chr2 = arr_chr[ok]
+    st0 = (st1c[ok] - 1).astype(np.int64)
+    en1o = en1c[ok].astype(np.int64)
+    rid = (keep["region_id"].astype(str) + "|" + keep["best_side"].astype(str)).to_list()
+
+    bed_df = pd.DataFrame({"chr": chr2, "start0": st0, "end1": en1o, "id": rid})
+    return keep, bed_df
+
+
 class BWMeanEngine:
     def __init__(self, bw_path: str):
         self.bw_path = bw_path
@@ -471,6 +746,7 @@ class BWMeanEngine:
 
         try:
             import pyBigWig  # type: ignore
+
             self.backend = "pybigwig"
             self.bw = pyBigWig.open(bw_path)
             return
@@ -481,9 +757,7 @@ class BWMeanEngine:
             self.backend = "ucsc"
             return
 
-        raise RuntimeError(
-            "No backend to read bigWig. Install pyBigWig or provide bigWigAverageOverBed in PATH."
-        )
+        raise RuntimeError("No backend to read bigWig. Install pyBigWig or provide bigWigAverageOverBed in PATH.")
 
     def close(self):
         if self.backend == "pybigwig" and self.bw is not None:
@@ -565,10 +839,15 @@ def score_edges(dir_mode, m_outL, m_inL, m_inR, m_outR):
     return sL, sR
 
 
+def preferred_sample_order(sample_values):
+    pref = ["HPNE", "PANC-1", "Capan-1"]
+    sset = set([str(x) for x in sample_values])
+    return list(dict.fromkeys([s for s in pref if s in sset] + sorted(sset - set(pref))))
 
 
 def parse_args():
     import argparse
+
     ap = argparse.ArgumentParser(
         description=(
             "Run motif enrichment on phased-array subtypes by directly consuming "
@@ -586,54 +865,67 @@ def parse_args():
                     help="Cluster assignment TSV. If set, it overrides --cluster_run_dir auto-detection.")
     io.add_argument("-O", "--out_dir", required=True,
                     help="Output directory for BEDs, metadata, and HOMER results.")
-    io.add_argument("--annotation_file", required=True,
-                    help="Annotation file for TSS filtering. Supports BED/BED.gz/GTF/GTF.gz.")
+    io.add_argument("--annotation_file", default=None,
+                    help="Annotation file for optional TSS filtering. Supports BED/BED.gz/GTF/GTF.gz. Required only when --tss_near_bp >= 0.")
     io.add_argument("--chrom_sizes", required=True,
                     help="Chromosome sizes file with two columns: chrom and length.")
 
     cl = ap.add_argument_group("Cluster selection")
     cl.add_argument("--target_clusters", default="ALL",
                     help="Comma-separated cluster labels to analyze, e.g. C1,C2. Use ALL to analyze all detected clusters.")
-    cl.add_argument("--cluster_col_candidates", default="cluster,k2_cluster,pattern_cluster",
+    cl.add_argument("--cluster_col_candidates", default="k2_cluster,cluster,pattern_cluster",
                     help="Comma-separated candidate cluster-column names. The first existing column will be used.")
     cl.add_argument("--fit_space_preference", default="within_sample_scaled",
                     help="Preferred fit-space label when multiple best-k cluster assignment TSVs exist under cluster_run_dir.")
 
     mode = ap.add_argument_group("Motif-region mode")
-    mode.add_argument("--mode", choices=["internal_linker", "edge_outside"], default="internal_linker",
-                      help="How target motif regions are built from phased arrays.")
-    mode.add_argument("--tss_near_bp", type=int, default=3000,
-                      help="Keep arrays overlapping a TSS-centered window of +/- this size.")
+    mode.add_argument("--mode", choices=["both", "internal_linker", "edge", "edge_outside", "edge_inside", "edge_both", "all"], default="edge",
+                      help=(
+                          "How target motif regions are built from phased arrays. "
+                          "edge reproduces the older bash workflow: one explicit relative range (or one semicolon-separated list of ranges) corresponds to one independent HOMER job per sample-cluster."
+                      ))
+    mode.add_argument("--tss_near_bp", type=int, default=-1,
+                      help="Keep arrays overlapping a TSS-centered window of +/- this size. Use -1 to disable TSS filtering entirely. Use 0 to keep only arrays that overlap the exact TSS base.")
     mode.add_argument("--min_n_target_arrays", type=int, default=30,
-                      help="Skip sample-cluster groups with fewer target arrays than this threshold.")
+                      help="General minimum target-array threshold. In edge mode, the actual skip check follows the older bash behavior and is applied after score/q_keep filtering.")
     mode.add_argument("--bg_multiple", type=float, default=2.0,
                       help="Number of background arrays relative to the number of target arrays.")
     mode.add_argument("--bg_match_location", action="store_true", default=True,
                       help="Sample background arrays matched by the 'location' column when available.")
     mode.add_argument("--no_bg_match_location", dest="bg_match_location", action="store_false",
                       help="Do not match background arrays by the 'location' column.")
-    mode.add_argument("--homer_auto_bg", action="store_true", default=False,
+    mode.add_argument("--homer_auto_bg", dest="homer_auto_bg", action="store_true", default=True,
                       help="Use HOMER internal background selection instead of writing explicit background BEDs.")
+    mode.add_argument("--no_homer_auto_bg", dest="homer_auto_bg", action="store_false",
+                      help="Write explicit background BEDs and pass -bg to HOMER.")
+    mode.add_argument("--bg_sampling_strategy", choices=["per_bin", "shared"], default="per_bin",
+                      help="When explicit backgrounds are used in edge modes, sample backgrounds independently for each bin or once per sample-cluster and share across bins.")
 
     il = ap.add_argument_group("internal_linker mode")
+    il.add_argument("--positions_map", type=str, default=None,
+                    help="Sample-to-position-file map in the form 'sample1=/path/a.positions.xls;sample2=/path/b.positions.xls'. Preferred over --dpos_map when both are provided.")
     il.add_argument("--dpos_map", type=str, default=None,
-                    help="Sample-to-DANPOS map in the form 'sample1=/path/a.xls;sample2=/path/b.xls'. Required for internal_linker mode.")
+                    help="Backward-compatible alias for position-file map in the form 'sample1=/path/a.xls;sample2=/path/b.xls'.")
     il.add_argument("--dpos_coord", choices=["1based_closed", "0based_halfopen"], default="1based_closed",
                     help="Coordinate convention for DANPOS smt_pos.")
     il.add_argument("--nuc_core_half_bp", type=int, default=70,
-                    help="Half-width of the masked nucleosome core around each dyad.")
+                    help="Half-width of the nucleosome core around each dyad.")
     il.add_argument("--min_linker_len", type=int, default=20,
                     help="Minimum linker length to keep.")
     il.add_argument("--internal_pad_bp", type=int, default=0,
                     help="Pad each internal linker segment on both sides by this many bp.")
+    il.add_argument("--internal_region_mode", choices=["linker", "nucleosome", "both"], default="linker",
+                    help="Internal-region composition used in internal_linker mode: linker only, nucleosome only, or both.")
+    il.add_argument("--internal_nuc_pad_bp", type=int, default=0,
+                    help="Pad each internal nucleosome segment on both sides by this many bp.")
     il.add_argument("--require_two_dyads_for_linker", action="store_true", default=True,
-                    help="Require at least two dyads within an array to define internal linkers.")
+                    help="Require at least two dyads within an array to define internal linkers. This setting only affects linker extraction.")
     il.add_argument("--allow_single_dyad_linker", dest="require_two_dyads_for_linker", action="store_false",
-                    help="Allow arrays with a single dyad when constructing internal linkers.")
+                    help="Allow linker extraction from arrays with a single dyad. This setting only affects linker extraction.")
 
-    eo = ap.add_argument_group("edge_outside mode")
+    eo = ap.add_argument_group("edge-based modes")
     eo.add_argument("--ins_bw_map", type=str, default=None,
-                    help="Sample-to-insertion-bigWig map in the form 'sample1=/path/a.bw;sample2=/path/b.bw'. Required for edge_outside mode.")
+                    help="Sample-to-insertion-bigWig map in the form 'sample1=/path/a.bw;sample2=/path/b.bw'. Required for all edge modes.")
     eo.add_argument("--cluster_dir_default", type=str, default="neutral",
                     choices=["neutral", "inside_low", "inside_high"],
                     help="Default edge-scoring direction for clusters not listed in --cluster_dir_map.")
@@ -647,14 +939,41 @@ def parse_args():
                     help="Flanking distance used to score left/right array edges.")
     eo.add_argument("--score_edge_bp", type=int, default=200,
                     help="Edge window size used to compare inside/outside ATAC signal.")
-    eo.add_argument("--rel_range", type=str, default="+275:+475",
-                    help="Relative motif window outside the chosen boundary summit.")
+
+    eo.add_argument("--outside_start_bp", type=int, default=75,
+                    help="Start distance of the outside boundary interval.")
+    eo.add_argument("--outside_end_bp", type=int, default=675,
+                    help="End distance of the outside boundary interval.")
+    eo.add_argument("--outside_num_bins", type=int, default=3,
+                    help="Number of equal-width bins to split the outside interval into. Each bin will be analyzed separately by HOMER.")
+
     eo.add_argument("--strict_outside_only", action="store_true", default=True,
-                    help="Require the relative window to stay strictly outside the array boundary.")
+                    help="Require outside intervals to start at positive distance from the boundary summit.")
     eo.add_argument("--allow_inside_overlap", dest="strict_outside_only", action="store_false",
-                    help="Allow relative windows that partly extend inside the array.")
+                    help="Allow intervals that overlap the boundary or interior.")
+
+    eo.add_argument("--rel_range", type=str, default=None,
+                    help="When --mode edge, one or more semicolon-separated ranges, e.g. '+400:+600' or '+400:+600;+600:+800'. Each range is run as an independent HOMER job per sample-cluster. Ignored by other edge modes.")
+    eo.add_argument("--range_offset_bp", type=int, default=70,
+                    help="Default offset added to user-specified relative coordinates in edge mode. Set 0 to disable.")
+    eo.add_argument("--motif_outside_bp", type=int, default=375,
+                    help="Outside window size used in edge mode when --rel_range is empty.")
+    eo.add_argument("--motif_inside_bp", type=int, default=275,
+                    help="Inside window size used in edge mode when --rel_range is empty.")
     eo.add_argument("--q_keep", type=float, default=0.95,
                     help="Keep the top fraction of target arrays by best edge score.")
+
+    ei = ap.add_argument_group("edge_inside mode")
+    ei.add_argument("--inside_start_rel", type=int, default=-475,
+                    help="Start relative coordinate of the inside-boundary interval.")
+    ei.add_argument("--inside_end_rel", type=int, default=-75,
+                    help="End relative coordinate of the inside-boundary interval. Must be greater than --inside_start_rel.")
+    ei.add_argument("--inside_num_bins", type=int, default=2,
+                    help="Number of equal-width bins to split the inside interval into. Each bin will be analyzed separately by HOMER.")
+    ei.add_argument("--inside_rel_range", type=str, default=None,
+                    help="Deprecated compatibility parameter. Ignored when inside bins are used.")
+    ei.add_argument("--inside_clip_to_array", action="store_true", default=False,
+                    help="Clip edge_inside windows to the array body.")
 
     hm = ap.add_argument_group("HOMER")
     hm.add_argument("--genome", required=True,
@@ -728,12 +1047,14 @@ def run_homer_from_summary(args, summary_df, outdir):
     extra_homer_args = split_shell_like(args.extra_homer_args)
     total = 0
     ok = 0
+
     for row in summary_df.itertuples(index=False):
         if str(getattr(row, "note", "")) not in ("ok", "ok_auto_bg"):
             continue
         tar = getattr(row, "target_bed", None)
         if tar is None or not isinstance(tar, str) or not os.path.exists(tar) or os.path.getsize(tar) == 0:
             continue
+
         total += 1
         tag = os.path.basename(tar)
         if tag.startswith("target."):
@@ -746,7 +1067,18 @@ def run_homer_from_summary(args, summary_df, outdir):
         log1 = os.path.join(outdir, "homer_logs", f"{tag}.out.txt")
         log2 = os.path.join(outdir, "homer_logs", f"{tag}.err.txt")
 
-        cmd = [args.homer_exec, tar, args.genome, out, "-size", "given", "-p", str(args.threads), "-len", str(args.homer_len)]
+        cmd = [
+            args.homer_exec,
+            tar,
+            args.genome,
+            out,
+            "-size",
+            "given",
+            "-p",
+            str(args.threads),
+            "-len",
+            str(args.homer_len),
+        ]
         if args.run_known_only:
             cmd.append("-nomotif")
         if not args.homer_auto_bg:
@@ -758,12 +1090,64 @@ def run_homer_from_summary(args, summary_df, outdir):
             cmd.extend(["-bg", bg])
         cmd.extend(extra_homer_args)
 
+        eprint(f">>> HOMER ({ok+1}/{total}) tag={tag} threads={args.threads} auto_bg={int(args.homer_auto_bg)}")
         with open(log1, "w") as fo, open(log2, "w") as fe:
             fe.write("COMMAND:\n" + " ".join(cmd) + "\n")
             subprocess.run(cmd, stdout=fo, stderr=fe, check=True)
         ok += 1
 
     return {"n_homer_jobs_total": int(total), "n_homer_jobs_completed": int(ok)}
+
+
+def build_edge_signal_meta(df_source: pd.DataFrame, samples, ins_map, chrlen, score_flank_bp, score_edge_bp):
+    meta_by_sample = {}
+    for sm in samples:
+        if sm not in ins_map:
+            raise RuntimeError(f"Missing insertion bigWig for sample={sm} in --ins_bw_map")
+        bw_path = ins_map[sm]
+        if not os.path.exists(bw_path):
+            raise RuntimeError(f"Insertion bigWig not found: {bw_path}")
+
+        eprint(f"\n>>> Sample={sm} | mode=edge_based")
+        df_sm = df_source[df_source["sample"] == sm].copy()
+        if df_sm.shape[0] == 0:
+            continue
+
+        chr_arr = df_sm["chr"].to_numpy(dtype=str)
+        start0 = df_sm["start"].to_numpy(dtype=np.int64)
+        end1 = df_sm["end"].to_numpy(dtype=np.int64)
+        (
+            summit_L,
+            summit_R,
+            outL_st1,
+            outL_en1,
+            inL_st1,
+            inL_en1,
+            inR_st1,
+            inR_en1,
+            outR_st1,
+            outR_en1,
+        ) = make_edge_windows(start0, end1, score_flank_bp, score_edge_bp)
+
+        engine = BWMeanEngine(bw_path)
+        try:
+            eprint(f"  BW backend: {engine.backend} ({bw_path})")
+            m_outL = engine.mean_intervals(chr_arr, outL_st1, outL_en1, chrlen)
+            m_inL = engine.mean_intervals(chr_arr, inL_st1, inL_en1, chrlen)
+            m_inR = engine.mean_intervals(chr_arr, inR_st1, inR_en1, chrlen)
+            m_outR = engine.mean_intervals(chr_arr, outR_st1, outR_en1, chrlen)
+        finally:
+            engine.close()
+
+        df_sm = df_sm.reset_index(drop=True)
+        df_sm["summit_L_1based"] = summit_L
+        df_sm["summit_R_1based"] = summit_R
+        df_sm["m_outL"] = m_outL
+        df_sm["m_inL"] = m_inL
+        df_sm["m_inR"] = m_inR
+        df_sm["m_outR"] = m_outR
+        meta_by_sample[sm] = df_sm
+    return meta_by_sample
 
 
 def main():
@@ -780,6 +1164,12 @@ def main():
         cluster_tsv, best_k_path, best_k = infer_cluster_tsv(args.cluster_run_dir, args.fit_space_preference)
 
     mode = args.mode
+    do_internal = mode in ("both", "internal_linker", "all")
+    do_edge_outside = mode in ("both", "edge_outside", "edge_both", "all")
+    do_edge_inside = mode in ("edge_inside", "edge_both", "all")
+    do_edge = mode == "edge"
+    do_edge_any = do_edge_outside or do_edge_inside or do_edge
+
     outdir = args.out_dir
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(os.path.join(outdir, "bed_target"), exist_ok=True)
@@ -792,8 +1182,14 @@ def main():
 
     if not os.path.exists(cluster_tsv):
         raise RuntimeError(f"Missing cluster TSV: {cluster_tsv}")
-    if not os.path.exists(args.annotation_file):
+    if args.annotation_file is not None and not os.path.exists(args.annotation_file):
         raise RuntimeError(f"Missing annotation file: {args.annotation_file}")
+
+    if args.tss_near_bp >= 0 and not args.annotation_file:
+        raise RuntimeError("--annotation_file is required when --tss_near_bp >= 0")
+
+    tss_filter_enabled = args.tss_near_bp >= 0
+    tss_tag = f"nearTSS{args.tss_near_bp}" if tss_filter_enabled else "noTSSFilter"
 
     eprint(f">>> Reading cluster TSV: {cluster_tsv}")
     df = pd.read_csv(cluster_tsv, sep="\t", low_memory=False)
@@ -813,33 +1209,46 @@ def main():
 
     df["sample"] = df["sample"].astype(str)
     df["region_id"] = df["region_id"].astype(str)
-    df["cluster"] = df[cluster_col].astype(str)
+    df["cluster"] = df[cluster_col].astype(str).str.strip()
     df["chr"] = df["chr"].astype(str)
     df["start"] = pd.to_numeric(df["start"], errors="coerce").astype("Int64")
     df["end"] = pd.to_numeric(df["end"], errors="coerce").astype("Int64")
     df["location"] = df["location"].astype(str)
+
+    df = df[df["cluster"].notna()].copy()
+    df = df[df["cluster"].str.len() > 0].copy()
+    df = df[~df["cluster"].isin(["NA", "na", "Na", "nA", "nan", "None"])].copy()
     df = df[df["start"].notna() & df["end"].notna()].copy()
     df["start"] = df["start"].astype(int)
     df["end"] = df["end"].astype(int)
     df = df[df["chr"].isin(chrlen.keys())].copy()
 
-    eprint(f">>> Building TSS-near windows from: {args.annotation_file}")
-    _, tss_starts_idx, tss_ends_idx = read_tss_as_windows(args.annotation_file, args.tss_near_bp, chrlen)
+    if tss_filter_enabled:
+        eprint(f">>> Building TSS-near windows from: {args.annotation_file}")
+        _, tss_starts_idx, tss_ends_idx = read_tss_as_windows(args.annotation_file, args.tss_near_bp, chrlen)
 
-    near_tss = []
-    for r in df.itertuples(index=False):
-        near_tss.append(overlaps_any_merged(r.chr, int(r.start), int(r.end), tss_starts_idx, tss_ends_idx))
-    df["near_tss"] = np.array(near_tss, dtype=bool)
-    df_tss = df[df["near_tss"]].copy()
-    df_tss.to_csv(os.path.join(outdir, "meta", "cluster_table.filtered_nearTSS.tsv"), sep="\t", index=False)
+        near_tss = []
+        for r in df.itertuples(index=False):
+            near_tss.append(overlaps_any_merged(r.chr, int(r.start), int(r.end), tss_starts_idx, tss_ends_idx))
+        df["near_tss"] = np.array(near_tss, dtype=bool)
+        df_tss = df[df["near_tss"]].copy()
+        df_tss.to_csv(os.path.join(outdir, "meta", "cluster_table.filtered_nearTSS.tsv"), sep="\t", index=False)
 
-    eprint(f">>> Arrays total: {df.shape[0]}")
-    eprint(f">>> Arrays near TSS (+/-{args.tss_near_bp}): {df_tss.shape[0]}")
+        eprint(f">>> Arrays total: {df.shape[0]}")
+        eprint(f">>> Arrays near TSS (+/-{args.tss_near_bp}): {df_tss.shape[0]}")
 
-    if df_tss.shape[0] == 0:
-        raise RuntimeError("No arrays remain after TSS filtering")
+        if df_tss.shape[0] == 0:
+            raise RuntimeError("No arrays remain after TSS filtering")
+    else:
+        eprint(">>> TSS filtering: disabled (using all arrays)")
+        df["near_tss"] = True
+        df_tss = df.copy()
+        df_tss.to_csv(os.path.join(outdir, "meta", "cluster_table.no_TSS_filter.tsv"), sep="\t", index=False)
 
-    samples = list(dict.fromkeys(df_tss["sample"].astype(str).tolist()))
+        eprint(f">>> Arrays total: {df.shape[0]}")
+        eprint(f">>> Arrays used (no TSS filter): {df_tss.shape[0]}")
+
+    samples = preferred_sample_order(df_tss["sample"].astype(str).tolist())
     all_clusters = sorted(df_tss["cluster"].dropna().astype(str).unique().tolist(), key=natural_key_cluster)
     if str(args.target_clusters).strip().upper() == "ALL":
         target_clusters = all_clusters
@@ -849,22 +1258,24 @@ def main():
         raise RuntimeError("No target clusters selected")
 
     summary_rows = []
+    positions_map_used_raw = None
 
-    if mode == "internal_linker":
-        if not args.dpos_map:
-            raise RuntimeError("--dpos_map is required for internal_linker mode")
-        dpos_map = parse_map_semicolon(args.dpos_map)
+    if do_internal:
+        positions_map_used_raw = args.positions_map if str(args.positions_map or "").strip() else args.dpos_map
+        if not positions_map_used_raw:
+            raise RuntimeError("--positions_map or --dpos_map is required for internal_linker mode")
+        dpos_map = parse_map_semicolon(positions_map_used_raw)
         if not dpos_map:
-            raise RuntimeError("Parsed --dpos_map is empty")
+            raise RuntimeError("Parsed --positions_map/--dpos_map is empty")
 
         for sm in samples:
             if sm not in dpos_map:
-                raise RuntimeError(f"Missing DANPOS positions file for sample={sm} in --dpos_map")
+                raise RuntimeError(f"Missing DANPOS positions file for sample={sm} in --positions_map/--dpos_map")
             dpos_path = dpos_map[sm]
             if not os.path.exists(dpos_path):
                 raise RuntimeError(f"DANPOS positions file not found: {dpos_path}")
 
-            eprint(f"\n>>> Sample={sm} | mode=internal_linker")
+            eprint(f"\n>>> Sample={sm} | mode=internal_linker | internal_region_mode={args.internal_region_mode}")
             df_sm = df_tss[df_tss["sample"] == sm].copy()
             if df_sm.shape[0] == 0:
                 continue
@@ -882,26 +1293,44 @@ def main():
                 df_tar = df_sm[df_sm["cluster"] == cl].copy()
                 n_tar_arrays = df_tar.shape[0]
                 tag = (
-                    f"{sm}.{cl}.nearTSS{args.tss_near_bp}.mode_internalLinker"
-                    f".core{args.nuc_core_half_bp}.minLink{args.min_linker_len}.pad{args.internal_pad_bp}"
-                    f".bgx{args.bg_multiple}.loc{int(args.bg_match_location)}.minTar{args.min_n_target_arrays}.autoBG{int(args.homer_auto_bg)}"
+                    f"{sm}.{cl}.{tss_tag}.mode_internalRegion.{args.internal_region_mode}"
+                    f".core{args.nuc_core_half_bp}.minLink{args.min_linker_len}"
+                    f".linkPad{args.internal_pad_bp}.nucPad{args.internal_nuc_pad_bp}"
+                    f".bgx{args.bg_multiple}.loc{int(args.bg_match_location)}"
+                    f".minTar{args.min_n_target_arrays}.autoBG{int(args.homer_auto_bg)}"
                 )
                 meta_path = os.path.join(outdir, "meta", f"meta.{tag}.tsv")
                 df_tar.to_csv(meta_path, sep="\t", index=False)
 
                 if n_tar_arrays < args.min_n_target_arrays:
                     eprint(f"[SKIP] {sm} {cl}: n_target_arrays={n_tar_arrays} < {args.min_n_target_arrays}")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_min_target_arrays", "n_target_arrays": int(n_tar_arrays)})
+                    summary_rows.append({
+                        "sample": sm,
+                        "cluster": cl,
+                        "mode": "internal_linker",
+                        "internal_region_mode": args.internal_region_mode,
+                        "note": "skip_min_target_arrays",
+                        "n_target_arrays": int(n_tar_arrays),
+                    })
                     continue
 
                 tar_segments = []
                 n_tar_arrays_with_segments = 0
                 for r in df_tar.itertuples(index=False):
-                    segs = linker_segments_for_region(
-                        chrom=r.chr, start0=int(r.start), end1=int(r.end), region_id=str(r.region_id),
-                        chr_to_dyads=chr_to_dyads, mask_intervals_by_chr=mask_intervals_by_chr,
+                    segs = internal_segments_for_region(
+                        chrom=r.chr,
+                        start0=int(r.start),
+                        end1=int(r.end),
+                        region_id=str(r.region_id),
+                        chr_to_dyads=chr_to_dyads,
+                        mask_intervals_by_chr=mask_intervals_by_chr,
+                        internal_region_mode=args.internal_region_mode,
                         require_two_dyads=args.require_two_dyads_for_linker,
-                        min_linker_len=args.min_linker_len, pad_bp=args.internal_pad_bp, chrlen=chrlen
+                        min_linker_len=args.min_linker_len,
+                        linker_pad_bp=args.internal_pad_bp,
+                        nuc_core_half_bp=args.nuc_core_half_bp,
+                        nuc_pad_bp=args.internal_nuc_pad_bp,
+                        chrlen=chrlen,
                     )
                     if segs:
                         n_tar_arrays_with_segments += 1
@@ -911,23 +1340,31 @@ def main():
                 tar_bed_df = pd.DataFrame(tar_segments, columns=["chr", "start0", "end1", "id"])
                 write_bed(tar_bed_df, tar_bed)
                 if tar_bed_df.shape[0] == 0:
-                    eprint(f"[SKIP] {sm} {cl}: no internal linker segments")
+                    eprint(f"[SKIP] {sm} {cl}: no internal segments")
                     summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "skip_no_target_segments",
+                        "sample": sm,
+                        "cluster": cl,
+                        "mode": "internal_linker",
+                        "internal_region_mode": args.internal_region_mode,
+                        "note": "skip_no_target_segments",
                         "n_target_arrays": int(n_tar_arrays),
                         "n_target_arrays_with_segments": int(n_tar_arrays_with_segments),
-                        "n_target_segments": 0
+                        "n_target_segments": 0,
                     })
                     continue
 
                 if args.homer_auto_bg:
                     eprint(f"[OK] {sm} {cl}: target_arrays={n_tar_arrays}, target_segments={tar_bed_df.shape[0]} (AUTO_BG=1)")
                     summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "ok_auto_bg",
+                        "sample": sm,
+                        "cluster": cl,
+                        "mode": "internal_linker",
+                        "internal_region_mode": args.internal_region_mode,
+                        "note": "ok_auto_bg",
                         "n_target_arrays": int(n_tar_arrays),
                         "n_target_arrays_with_segments": int(n_tar_arrays_with_segments),
                         "n_target_segments": int(tar_bed_df.shape[0]),
-                        "target_bed": tar_bed
+                        "target_bed": tar_bed,
                     })
                     continue
 
@@ -935,8 +1372,13 @@ def main():
                 if df_bg_pool.shape[0] == 0:
                     eprint(f"[WARN] {sm} {cl}: bg pool empty")
                     summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_pool_empty",
-                        "n_target_arrays": int(n_tar_arrays), "n_target_segments": int(tar_bed_df.shape[0])
+                        "sample": sm,
+                        "cluster": cl,
+                        "mode": "internal_linker",
+                        "internal_region_mode": args.internal_region_mode,
+                        "note": "skip_bg_pool_empty",
+                        "n_target_arrays": int(n_tar_arrays),
+                        "n_target_segments": int(tar_bed_df.shape[0]),
                     })
                     continue
 
@@ -945,11 +1387,20 @@ def main():
                 bg_segments = []
                 n_bg_arrays_with_segments = 0
                 for r in df_bg_pick.itertuples(index=False):
-                    segs = linker_segments_for_region(
-                        chrom=r.chr, start0=int(r.start), end1=int(r.end), region_id=str(r.region_id),
-                        chr_to_dyads=chr_to_dyads, mask_intervals_by_chr=mask_intervals_by_chr,
+                    segs = internal_segments_for_region(
+                        chrom=r.chr,
+                        start0=int(r.start),
+                        end1=int(r.end),
+                        region_id=str(r.region_id),
+                        chr_to_dyads=chr_to_dyads,
+                        mask_intervals_by_chr=mask_intervals_by_chr,
+                        internal_region_mode=args.internal_region_mode,
                         require_two_dyads=args.require_two_dyads_for_linker,
-                        min_linker_len=args.min_linker_len, pad_bp=args.internal_pad_bp, chrlen=chrlen
+                        min_linker_len=args.min_linker_len,
+                        linker_pad_bp=args.internal_pad_bp,
+                        nuc_core_half_bp=args.nuc_core_half_bp,
+                        nuc_pad_bp=args.internal_nuc_pad_bp,
+                        chrlen=chrlen,
                     )
                     if segs:
                         n_bg_arrays_with_segments += 1
@@ -961,222 +1412,728 @@ def main():
                 if bg_bed_df.shape[0] == 0:
                     eprint(f"[WARN] {sm} {cl}: bg segments empty")
                     summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_no_segments",
+                        "sample": sm,
+                        "cluster": cl,
+                        "mode": "internal_linker",
+                        "internal_region_mode": args.internal_region_mode,
+                        "note": "skip_bg_no_segments",
                         "n_target_arrays": int(n_tar_arrays),
                         "n_target_segments": int(tar_bed_df.shape[0]),
                         "n_bg_arrays": int(df_bg_pick.shape[0]),
                         "n_bg_arrays_with_segments": int(n_bg_arrays_with_segments),
-                        "n_bg_segments": 0
+                        "n_bg_segments": 0,
                     })
                     continue
 
                 eprint(f"[OK] {sm} {cl}: target_arrays={n_tar_arrays}, target_segments={tar_bed_df.shape[0]}, bg_arrays={df_bg_pick.shape[0]}, bg_segments={bg_bed_df.shape[0]}")
                 summary_rows.append({
-                    "sample": sm, "cluster": cl, "mode": mode, "note": "ok",
+                    "sample": sm,
+                    "cluster": cl,
+                    "mode": "internal_linker",
+                    "internal_region_mode": args.internal_region_mode,
+                    "note": "ok",
                     "n_target_arrays": int(n_tar_arrays),
                     "n_target_arrays_with_segments": int(n_tar_arrays_with_segments),
                     "n_target_segments": int(tar_bed_df.shape[0]),
                     "n_bg_arrays": int(df_bg_pick.shape[0]),
                     "n_bg_arrays_with_segments": int(n_bg_arrays_with_segments),
                     "n_bg_segments": int(bg_bed_df.shape[0]),
-                    "target_bed": tar_bed, "bg_bed": bg_bed
+                    "target_bed": tar_bed,
+                    "bg_bed": bg_bed,
                 })
 
-    elif mode == "edge_outside":
+    if do_edge_any:
         if not args.ins_bw_map:
-            raise RuntimeError("--ins_bw_map is required for edge_outside mode")
+            raise RuntimeError("--ins_bw_map is required for edge modes")
         ins_map = parse_map_semicolon(args.ins_bw_map)
         if not ins_map:
             raise RuntimeError("Parsed --ins_bw_map is empty")
         dir_map = parse_map_semicolon(args.cluster_dir_map)
-        rel_range = parse_rel_range(args.rel_range)
-        if rel_range is None:
-            raise RuntimeError("Invalid --rel_range")
-        if args.strict_outside_only and (rel_range[0] <= 0 or rel_range[1] <= 0):
-            raise RuntimeError(f"--strict_outside_only requires a strictly positive --rel_range, got {args.rel_range}")
 
-        meta_by_sample = {}
-        for sm in samples:
-            if sm not in ins_map:
-                raise RuntimeError(f"Missing insertion bigWig for sample={sm} in --ins_bw_map")
-            bw_path = ins_map[sm]
-            if not os.path.exists(bw_path):
-                raise RuntimeError(f"Insertion bigWig not found: {bw_path}")
+        meta_by_sample = build_edge_signal_meta(
+            df_source=df_tss,
+            samples=samples,
+            ins_map=ins_map,
+            chrlen=chrlen,
+            score_flank_bp=args.score_flank_bp,
+            score_edge_bp=args.score_edge_bp,
+        )
 
-            eprint(f"\n>>> Sample={sm} | mode=edge_outside")
-            df_sm = df_tss[df_tss["sample"] == sm].copy()
-            if df_sm.shape[0] == 0:
-                continue
+        if do_edge:
+            rel_specs = parse_rel_range_list(args.rel_range)
+            if len(rel_specs) == 0:
+                rel_specs = [(1, None, None, "legacyOutsideInside")]
+            eprint(f">>> edge ranges: {len(rel_specs)} | range_offset_bp={args.range_offset_bp} (away-from-zero)")
 
-            chr_arr = df_sm["chr"].to_numpy(dtype=str)
-            start0 = df_sm["start"].to_numpy(dtype=np.int64)
-            end1 = df_sm["end"].to_numpy(dtype=np.int64)
-            (
-                summit_L, summit_R,
-                outL_st1, outL_en1,
-                inL_st1, inL_en1,
-                inR_st1, inR_en1,
-                outR_st1, outR_en1,
-            ) = make_edge_windows(start0, end1, args.score_flank_bp, args.score_edge_bp)
-
-            engine = BWMeanEngine(bw_path)
-            try:
-                eprint(f"  BW backend: {engine.backend} ({bw_path})")
-                m_outL = engine.mean_intervals(chr_arr, outL_st1, outL_en1, chrlen)
-                m_inL = engine.mean_intervals(chr_arr, inL_st1, inL_en1, chrlen)
-                m_inR = engine.mean_intervals(chr_arr, inR_st1, inR_en1, chrlen)
-                m_outR = engine.mean_intervals(chr_arr, outR_st1, outR_en1, chrlen)
-            finally:
-                engine.close()
-
-            df_sm = df_sm.reset_index(drop=True)
-            df_sm["summit_L_1based"] = summit_L
-            df_sm["summit_R_1based"] = summit_R
-            df_sm["m_outL"] = m_outL
-            df_sm["m_inL"] = m_inL
-            df_sm["m_inR"] = m_inR
-            df_sm["m_outR"] = m_outR
-            meta_by_sample[sm] = df_sm
-
-        for sm in samples:
-            df_sm = meta_by_sample.get(sm)
-            if df_sm is None or df_sm.shape[0] == 0:
-                continue
-            for cl in target_clusters:
-                df_tar = df_sm[df_sm["cluster"] == cl].copy()
-                n_tar_arrays = df_tar.shape[0]
-                dir_cl = dir_map.get(cl, args.cluster_dir_default)
-                tag = (
-                    f"{sm}.{cl}.nearTSS{args.tss_near_bp}.mode_edgeOutside"
-                    f".scoreF{args.score_flank_bp}.scoreE{args.score_edge_bp}.rel{args.rel_range.replace(':','to')}"
-                    f".q{args.q_keep}.bgx{args.bg_multiple}.loc{int(args.bg_match_location)}.minTar{args.min_n_target_arrays}"
-                    f".pos{int(args.require_positive_score)}.autoBG{int(args.homer_auto_bg)}"
-                )
-                if n_tar_arrays < args.min_n_target_arrays:
-                    eprint(f"[SKIP] {sm} {cl}: n_target_arrays={n_tar_arrays} < {args.min_n_target_arrays}")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_min_target_arrays", "n_target_arrays": int(n_tar_arrays)})
+            for sm in samples:
+                df_sm = meta_by_sample.get(sm)
+                if df_sm is None or df_sm.shape[0] == 0:
                     continue
 
-                sL, sR = score_edges(dir_cl, df_tar["m_outL"].to_numpy(), df_tar["m_inL"].to_numpy(), df_tar["m_inR"].to_numpy(), df_tar["m_outR"].to_numpy())
-                meta_tar = df_tar[["sample", "cluster", "region_id", "chr", "start", "end", "location", "near_tss", "summit_L_1based", "summit_R_1based"]].copy()
-                meta_tar["score_left"] = sL
-                meta_tar["score_right"] = sR
-                meta_tar["best_side"] = np.where(meta_tar["score_left"] >= meta_tar["score_right"], "L", "R")
-                meta_tar["best_score"] = np.maximum(meta_tar["score_left"], meta_tar["score_right"])
-                meta_tar["best_summit_1based"] = np.where(meta_tar["best_side"] == "L", meta_tar["summit_L_1based"], meta_tar["summit_R_1based"]).astype(np.int64)
-                meta_tar = meta_tar[np.isfinite(meta_tar["best_score"])].copy()
-                if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
-                    meta_tar = meta_tar[meta_tar["best_score"] > 0].copy()
-                if meta_tar.shape[0] == 0:
-                    eprint(f"[SKIP] {sm} {cl}: no target arrays left after score filtering")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_no_arrays_after_score_filter", "n_target_arrays": int(n_tar_arrays)})
+                for cl in target_clusters:
+                    df_cl = df_sm[df_sm["cluster"] == cl].copy()
+                    if df_cl.shape[0] == 0:
+                        continue
+
+                    dir_cl = dir_map.get(str(cl), args.cluster_dir_default)
+                    if dir_cl not in ("inside_low", "inside_high", "neutral"):
+                        raise RuntimeError(f"Invalid dir mode for cluster={cl}: {dir_cl}")
+
+                    sL, sR = score_edges(
+                        dir_cl,
+                        df_cl["m_outL"].to_numpy(),
+                        df_cl["m_inL"].to_numpy(),
+                        df_cl["m_inR"].to_numpy(),
+                        df_cl["m_outR"].to_numpy(),
+                    )
+                    df_cl["score_left"] = sL
+                    df_cl["score_right"] = sR
+                    df_cl["best_side"] = np.where(df_cl["score_left"] >= df_cl["score_right"], "L", "R")
+                    df_cl["best_score"] = np.maximum(df_cl["score_left"], df_cl["score_right"])
+                    df_cl["best_summit_1based"] = np.where(
+                        df_cl["best_side"] == "L",
+                        df_cl["summit_L_1based"],
+                        df_cl["summit_R_1based"],
+                    ).astype(np.int64)
+                    df_cl["dir_cluster"] = dir_cl
+
+                    meta = df_cl[[
+                        "sample", "cluster", "region_id", "chr", "start", "end", "location",
+                        "dir_cluster", "score_left", "score_right", "best_side", "best_score", "best_summit_1based",
+                        "m_outL", "m_inL", "m_inR", "m_outR"
+                    ]].copy()
+
+                    meta_f = meta[np.isfinite(meta["best_score"])].copy()
+                    if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
+                        meta_f = meta_f[meta_f["best_score"] > 0].copy()
+
+                    if meta_f.shape[0] == 0:
+                        eprint(f"[SKIP] {sm} {cl} no valid regions after score filtering (dir={dir_cl})")
+                        for _, rel_a_raw, rel_b_raw, _raw_text in rel_specs:
+                            if rel_a_raw is None:
+                                rel_str = "NA"
+                            else:
+                                rel_a_use, rel_b_use = shift_rel_range(rel_a_raw, rel_b_raw, args.range_offset_bp)
+                                rel_str = f"{rel_a_use:+d}to{rel_b_use:+d}"
+                            tag0 = (
+                                f"{sm}.{cl}.dir_{dir_cl}.scoreF{args.score_flank_bp}.scoreE{args.score_edge_bp}"
+                                f".motifOut{args.motif_outside_bp}.motifIn{args.motif_inside_bp}.rel{rel_str}"
+                                f".q{args.q_keep}.pos{int(args.require_positive_score)}.autoBG{int(args.homer_auto_bg)}"
+                            )
+                            meta_path0 = os.path.join(outdir, "meta", f"meta.{tag0}.tsv")
+                            meta.to_csv(meta_path0, sep="\t", index=False)
+                        continue
+
+                    thr = meta_f["best_score"].quantile(1.0 - float(args.q_keep))
+                    meta_keep = meta_f[(meta_f["best_score"] >= thr) & np.isfinite(meta_f["best_score"])].copy()
+
+                    if meta_keep.shape[0] < int(args.min_n_target_arrays):
+                        eprint(f"[SKIP motif] {sm} {cl} kept={meta_keep.shape[0]} < {args.min_n_target_arrays} (dir={dir_cl})")
+                        for _, rel_a_raw, rel_b_raw, _raw_text in rel_specs:
+                            if rel_a_raw is None:
+                                rel_str = "NA"
+                            else:
+                                rel_a_use, rel_b_use = shift_rel_range(rel_a_raw, rel_b_raw, args.range_offset_bp)
+                                rel_str = f"{rel_a_use:+d}to{rel_b_use:+d}"
+                            tag_skip = (
+                                f"{sm}.{cl}.dir_{dir_cl}.scoreF{args.score_flank_bp}.scoreE{args.score_edge_bp}"
+                                f".motifOut{args.motif_outside_bp}.motifIn{args.motif_inside_bp}.rel{rel_str}"
+                                f".q{args.q_keep}.bgx{args.bg_multiple}.minTar{args.min_n_target_arrays}.loc{int(args.bg_match_location)}"
+                                f".pos{int(args.require_positive_score)}.autoBG{int(args.homer_auto_bg)}"
+                            )
+                            meta_path_skip = os.path.join(outdir, "meta", f"meta.{tag_skip}.tsv")
+                            meta.to_csv(meta_path_skip, sep="\t", index=False)
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge",
+                                "rel_range_used": rel_str,
+                                "rel_range_used_input": "" if rel_a_raw is None else f"{rel_a_raw:+d}:{rel_b_raw:+d}",
+                                "note": "skip_min_target_after_qkeep",
+                                "n_target_arrays": int(df_cl.shape[0]),
+                                "n_target_arrays_kept": int(meta_keep.shape[0]),
+                            })
+                        continue
+
+                    for _, rel_a_raw, rel_b_raw, raw_text in rel_specs:
+                        if rel_a_raw is None:
+                            rel_a_use = None
+                            rel_b_use = None
+                            rel_str = "NA"
+                        else:
+                            rel_a_use, rel_b_use = shift_rel_range(rel_a_raw, rel_b_raw, args.range_offset_bp)
+                            rel_str = f"{rel_a_use:+d}to{rel_b_use:+d}"
+
+                        tag = (
+                            f"{sm}.{cl}.dir_{dir_cl}.scoreF{args.score_flank_bp}.scoreE{args.score_edge_bp}"
+                            f".motifOut{args.motif_outside_bp}.motifIn{args.motif_inside_bp}.rel{rel_str}"
+                            f".q{args.q_keep}.bgx{args.bg_multiple}.minTar{args.min_n_target_arrays}.loc{int(args.bg_match_location)}"
+                            f".pos{int(args.require_positive_score)}.autoBG{int(args.homer_auto_bg)}"
+                        )
+                        meta_path = os.path.join(outdir, "meta", f"meta.{tag}.tsv")
+                        meta.to_csv(meta_path, sep="\t", index=False)
+
+                        tar_chr = meta_keep["chr"].astype(str).to_numpy()
+                        tar_side = meta_keep["best_side"].astype(str).to_numpy()
+                        tar_summit = meta_keep["best_summit_1based"].to_numpy(dtype=np.int64)
+
+                        tar_st1 = np.zeros_like(tar_summit)
+                        tar_en1 = np.zeros_like(tar_summit)
+                        for i in range(tar_summit.size):
+                            if rel_a_use is not None:
+                                s1, e1 = make_motif_window_1based_relative(int(tar_summit[i]), tar_side[i], rel_a_use, rel_b_use)
+                            else:
+                                s1, e1 = make_motif_window_1based(int(tar_summit[i]), tar_side[i], args.motif_outside_bp, args.motif_inside_bp)
+                            tar_st1[i] = s1
+                            tar_en1[i] = e1
+
+                        ok, tar_st1c, tar_en1c = clip_1based_inclusive(tar_chr, tar_st1, tar_en1, chrlen)
+                        meta_keep2 = meta_keep.iloc[np.where(ok)[0]].copy()
+                        tar_chr2 = tar_chr[ok]
+                        tar_st0 = (tar_st1c[ok] - 1).astype(np.int64)
+                        tar_en1o = tar_en1c[ok].astype(np.int64)
+                        tar_id = (meta_keep2["region_id"].astype(str) + "|" + meta_keep2["best_side"].astype(str)).to_list()
+
+                        tar_df = pd.DataFrame({"chr": tar_chr2, "start0": tar_st0, "end1": tar_en1o, "id": tar_id})
+                        tar_df = tar_df.sort_values(["chr", "start0"])
+                        tar_bed = os.path.join(outdir, "bed_target", f"target.{tag}.bed")
+                        tar_df.to_csv(tar_bed, sep="\t", index=False, header=False)
+
+                        if args.homer_auto_bg:
+                            eprint(f"[OK] {sm} {cl} dir={dir_cl} rel={rel_str} target={meta_keep2.shape[0]} tag={tag} (AUTO_BG=1)")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge",
+                                "rel_range_used": rel_str,
+                                "rel_range_used_input": "" if rel_a_raw is None else raw_text,
+                                "note": "ok_auto_bg",
+                                "n_target_arrays": int(df_cl.shape[0]),
+                                "n_target_arrays_kept": int(meta_keep2.shape[0]),
+                                "n_target_windows": int(tar_df.shape[0]),
+                                "target_bed": tar_bed,
+                            })
+                            continue
+
+                        df_bg_pool = df_sm[df_sm["cluster"] != cl].copy()
+                        if df_bg_pool.shape[0] == 0:
+                            eprint(f"[SKIP bg] {sm} {cl} rel={rel_str} no bg pool")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge",
+                                "rel_range_used": rel_str,
+                                "note": "skip_bg_pool_empty",
+                                "n_target_arrays": int(df_cl.shape[0]),
+                                "n_target_arrays_kept": int(meta_keep2.shape[0]),
+                                "n_target_windows": int(tar_df.shape[0]),
+                            })
+                            continue
+
+                        b_sL, b_sR = score_edges(
+                            dir_cl,
+                            df_bg_pool["m_outL"].to_numpy(),
+                            df_bg_pool["m_inL"].to_numpy(),
+                            df_bg_pool["m_inR"].to_numpy(),
+                            df_bg_pool["m_outR"].to_numpy()
+                        )
+                        bg_meta = df_bg_pool[["region_id", "chr", "start", "end", "location", "summit_L_1based", "summit_R_1based"]].copy()
+                        bg_meta["score_left"] = b_sL
+                        bg_meta["score_right"] = b_sR
+                        bg_meta["best_side"] = np.where(bg_meta["score_left"] >= bg_meta["score_right"], "L", "R")
+                        bg_meta["best_score"] = np.maximum(bg_meta["score_left"], bg_meta["score_right"])
+                        bg_meta["best_summit_1based"] = np.where(
+                            bg_meta["best_side"] == "L",
+                            bg_meta["summit_L_1based"],
+                            bg_meta["summit_R_1based"]
+                        ).astype(np.int64)
+
+                        bg_meta = bg_meta[np.isfinite(bg_meta["best_score"])].copy()
+                        if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
+                            bg_meta = bg_meta[bg_meta["best_score"] > 0].copy()
+
+                        if bg_meta.shape[0] == 0:
+                            eprint(f"[SKIP bg] {sm} {cl} rel={rel_str} bg_meta=0 after filtering")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge",
+                                "rel_range_used": rel_str,
+                                "note": "skip_bg_empty_after_filter",
+                                "n_target_arrays": int(df_cl.shape[0]),
+                                "n_target_arrays_kept": int(meta_keep2.shape[0]),
+                                "n_target_windows": int(tar_df.shape[0]),
+                            })
+                            continue
+
+                        n_tar = meta_keep2.shape[0]
+                        n_bg_need = int(math.ceil(float(args.bg_multiple) * float(n_tar)))
+                        bg_pick = sample_background_regions(bg_meta, meta_keep2, n_bg_need, args.bg_match_location, seed=1)
+                        if bg_pick.shape[0] == 0:
+                            eprint(f"[SKIP bg] {sm} {cl} rel={rel_str} bg_pick=0")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge",
+                                "rel_range_used": rel_str,
+                                "note": "skip_bg_pick_empty",
+                                "n_target_arrays": int(df_cl.shape[0]),
+                                "n_target_arrays_kept": int(meta_keep2.shape[0]),
+                                "n_target_windows": int(tar_df.shape[0]),
+                            })
+                            continue
+
+                        bg_chr = bg_pick["chr"].astype(str).to_numpy()
+                        bg_side = bg_pick["best_side"].astype(str).to_numpy()
+                        bg_summit = bg_pick["best_summit_1based"].to_numpy(dtype=np.int64)
+
+                        bg_st1 = np.zeros_like(bg_summit)
+                        bg_en1 = np.zeros_like(bg_summit)
+                        for i in range(bg_summit.size):
+                            if rel_a_use is not None:
+                                s1, e1 = make_motif_window_1based_relative(int(bg_summit[i]), bg_side[i], rel_a_use, rel_b_use)
+                            else:
+                                s1, e1 = make_motif_window_1based(int(bg_summit[i]), bg_side[i], args.motif_outside_bp, args.motif_inside_bp)
+                            bg_st1[i] = s1
+                            bg_en1[i] = e1
+
+                        okb, bg_st1c, bg_en1c = clip_1based_inclusive(bg_chr, bg_st1, bg_en1, chrlen)
+                        bg_pick2 = bg_pick.iloc[np.where(okb)[0]].copy()
+                        bg_chr2 = bg_chr[okb]
+                        bg_st0 = (bg_st1c[okb] - 1).astype(np.int64)
+                        bg_en1o = bg_en1c[okb].astype(np.int64)
+                        bg_id = (bg_pick2["region_id"].astype(str) + "|" + bg_pick2["best_side"].astype(str)).to_list()
+
+                        bg_df = pd.DataFrame({"chr": bg_chr2, "start0": bg_st0, "end1": bg_en1o, "id": bg_id})
+                        bg_df = bg_df.sort_values(["chr", "start0"])
+                        bg_bed = os.path.join(outdir, "bed_bg", f"bg.{tag}.bed")
+                        bg_df.to_csv(bg_bed, sep="\t", index=False, header=False)
+
+                        eprint(f"[OK] {sm} {cl} dir={dir_cl} rel={rel_str} target={meta_keep2.shape[0]} bg={bg_pick2.shape[0]} tag={tag}")
+                        summary_rows.append({
+                            "sample": sm,
+                            "cluster": cl,
+                            "mode": "edge",
+                            "rel_range_used": rel_str,
+                            "rel_range_used_input": "" if rel_a_raw is None else raw_text,
+                            "note": "ok",
+                            "n_target_arrays": int(df_cl.shape[0]),
+                            "n_target_arrays_kept": int(meta_keep2.shape[0]),
+                            "n_target_windows": int(tar_df.shape[0]),
+                            "n_bg_arrays": int(bg_pick2.shape[0]),
+                            "n_bg_windows": int(bg_df.shape[0]),
+                            "target_bed": tar_bed,
+                            "bg_bed": bg_bed,
+                        })
+
+        if do_edge_outside or do_edge_inside:
+            outside_bins = build_equal_distance_bins(args.outside_start_bp, args.outside_end_bp, args.outside_num_bins)
+            inside_bins = build_equal_distance_bins_rel(args.inside_start_rel, args.inside_end_rel, args.inside_num_bins, err_prefix="inside")
+
+            if args.strict_outside_only and args.outside_start_bp <= 0:
+                raise RuntimeError("--strict_outside_only requires --outside_start_bp > 0")
+            if args.inside_end_rel > 0:
+                raise RuntimeError("--inside_end_rel should be <= 0 for inward windows")
+
+            for sm in samples:
+                df_sm = meta_by_sample.get(sm)
+                if df_sm is None or df_sm.shape[0] == 0:
                     continue
 
-                if float(args.q_keep) < 1:
-                    cutoff = float(meta_tar["best_score"].quantile(1 - float(args.q_keep)))
-                    meta_keep = meta_tar[meta_tar["best_score"] >= cutoff].copy()
-                else:
-                    meta_keep = meta_tar.copy()
-                meta_keep = meta_keep.sort_values(["best_score", "region_id"], ascending=[False, True]).reset_index(drop=True)
-                meta_path = os.path.join(outdir, "meta", f"meta.{tag}.tsv")
-                meta_keep.to_csv(meta_path, sep="\t", index=False)
+                for cl in target_clusters:
+                    df_tar = df_sm[df_sm["cluster"] == cl].copy()
+                    n_tar_arrays = df_tar.shape[0]
+                    dir_cl = dir_map.get(cl, args.cluster_dir_default)
 
-                tar_chr = meta_keep["chr"].astype(str).to_numpy()
-                tar_side = meta_keep["best_side"].astype(str).to_numpy()
-                tar_summit = meta_keep["best_summit_1based"].to_numpy(dtype=np.int64)
-                tar_st1 = np.zeros_like(tar_summit)
-                tar_en1 = np.zeros_like(tar_summit)
-                for i in range(tar_summit.size):
-                    s1, e1 = make_motif_window_1based_relative(int(tar_summit[i]), tar_side[i], rel_range[0], rel_range[1])
-                    tar_st1[i] = s1
-                    tar_en1[i] = e1
-                ok, tar_st1c, tar_en1c = clip_1based_inclusive(tar_chr, tar_st1, tar_en1, chrlen)
-                meta_keep2 = meta_keep.iloc[np.where(ok)[0]].copy()
-                tar_chr2 = tar_chr[ok]
-                tar_st0 = (tar_st1c[ok] - 1).astype(np.int64)
-                tar_en1o = tar_en1c[ok].astype(np.int64)
-                tar_id = (meta_keep2["region_id"].astype(str) + "|" + meta_keep2["best_side"].astype(str)).to_list()
-                tar_bed_df = pd.DataFrame({"chr": tar_chr2, "start0": tar_st0, "end1": tar_en1o, "id": tar_id})
-                tar_bed = os.path.join(outdir, "bed_target", f"target.{tag}.bed")
-                write_bed(tar_bed_df, tar_bed)
-                if tar_bed_df.shape[0] == 0:
-                    eprint(f"[SKIP] {sm} {cl}: no target windows after clipping")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_no_target_windows", "n_target_arrays": int(n_tar_arrays), "n_target_arrays_kept": int(meta_keep.shape[0]), "n_target_windows": 0})
-                    continue
+                    base_tag = (
+                        f"{sm}.{cl}.{tss_tag}.mode_edgeBased"
+                        f".scoreF{args.score_flank_bp}.scoreE{args.score_edge_bp}"
+                        f".q{args.q_keep}.bgx{args.bg_multiple}.loc{int(args.bg_match_location)}"
+                        f".minTar{args.min_n_target_arrays}.pos{int(args.require_positive_score)}"
+                        f".autoBG{int(args.homer_auto_bg)}"
+                    )
 
-                if args.homer_auto_bg:
-                    eprint(f"[OK] {sm} {cl}: target_arrays={n_tar_arrays}, kept={meta_keep2.shape[0]}, target_windows={tar_bed_df.shape[0]} (AUTO_BG=1)")
-                    summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "ok_auto_bg",
-                        "n_target_arrays": int(n_tar_arrays), "n_target_arrays_kept": int(meta_keep2.shape[0]),
-                        "n_target_windows": int(tar_bed_df.shape[0]), "target_bed": tar_bed
-                    })
-                    continue
+                    if n_tar_arrays < args.min_n_target_arrays:
+                        if do_edge_outside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_outside", "note": "skip_min_target_arrays", "n_target_arrays": int(n_tar_arrays)})
+                        if do_edge_inside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_inside", "note": "skip_min_target_arrays", "n_target_arrays": int(n_tar_arrays)})
+                        eprint(f"[SKIP] {sm} {cl}: n_target_arrays={n_tar_arrays} < {args.min_n_target_arrays}")
+                        continue
 
-                df_bg_pool = df_sm[df_sm["cluster"] != cl].copy()
-                if df_bg_pool.shape[0] == 0:
-                    eprint(f"[WARN] {sm} {cl}: bg pool empty")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_pool_empty", "n_target_arrays": int(n_tar_arrays), "n_target_windows": int(tar_bed_df.shape[0])})
-                    continue
+                    sL, sR = score_edges(
+                        dir_cl,
+                        df_tar["m_outL"].to_numpy(),
+                        df_tar["m_inL"].to_numpy(),
+                        df_tar["m_inR"].to_numpy(),
+                        df_tar["m_outR"].to_numpy(),
+                    )
 
-                b_sL, b_sR = score_edges(dir_cl, df_bg_pool["m_outL"].to_numpy(), df_bg_pool["m_inL"].to_numpy(), df_bg_pool["m_inR"].to_numpy(), df_bg_pool["m_outR"].to_numpy())
-                bg_meta = df_bg_pool[["region_id", "chr", "start", "end", "location", "summit_L_1based", "summit_R_1based"]].copy()
-                bg_meta["score_left"] = b_sL
-                bg_meta["score_right"] = b_sR
-                bg_meta["best_side"] = np.where(bg_meta["score_left"] >= bg_meta["score_right"], "L", "R")
-                bg_meta["best_score"] = np.maximum(bg_meta["score_left"], bg_meta["score_right"])
-                bg_meta["best_summit_1based"] = np.where(bg_meta["best_side"] == "L", bg_meta["summit_L_1based"], bg_meta["summit_R_1based"]).astype(np.int64)
-                bg_meta = bg_meta[np.isfinite(bg_meta["best_score"])].copy()
-                if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
-                    bg_meta = bg_meta[bg_meta["best_score"] > 0].copy()
-                if bg_meta.shape[0] == 0:
-                    eprint(f"[WARN] {sm} {cl}: bg empty after score filtering")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_empty_after_filter", "n_target_arrays": int(n_tar_arrays), "n_target_windows": int(tar_bed_df.shape[0])})
-                    continue
+                    meta_tar = df_tar[[
+                        "sample",
+                        "cluster",
+                        "region_id",
+                        "chr",
+                        "start",
+                        "end",
+                        "location",
+                        "near_tss",
+                        "summit_L_1based",
+                        "summit_R_1based",
+                    ]].copy()
+                    meta_tar["score_left"] = sL
+                    meta_tar["score_right"] = sR
+                    meta_tar["best_side"] = np.where(meta_tar["score_left"] >= meta_tar["score_right"], "L", "R")
+                    meta_tar["best_score"] = np.maximum(meta_tar["score_left"], meta_tar["score_right"])
+                    meta_tar["best_summit_1based"] = np.where(
+                        meta_tar["best_side"] == "L",
+                        meta_tar["summit_L_1based"],
+                        meta_tar["summit_R_1based"],
+                    ).astype(np.int64)
 
-                n_bg_need = int(math.ceil(args.bg_multiple * float(meta_keep2.shape[0])))
-                bg_pick = sample_background_regions(bg_meta, meta_keep2, n_bg_need, args.bg_match_location, seed=1)
-                if bg_pick.shape[0] == 0:
-                    eprint(f"[WARN] {sm} {cl}: bg_pick empty")
-                    summary_rows.append({"sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_pick_empty", "n_target_arrays": int(n_tar_arrays), "n_target_windows": int(tar_bed_df.shape[0])})
-                    continue
+                    meta_tar = meta_tar[np.isfinite(meta_tar["best_score"])].copy()
+                    if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
+                        meta_tar = meta_tar[meta_tar["best_score"] > 0].copy()
+                    if meta_tar.shape[0] == 0:
+                        eprint(f"[SKIP] {sm} {cl}: no target arrays left after score filtering")
+                        if do_edge_outside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_outside", "note": "skip_no_arrays_after_score_filter", "n_target_arrays": int(n_tar_arrays)})
+                        if do_edge_inside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_inside", "note": "skip_no_arrays_after_score_filter", "n_target_arrays": int(n_tar_arrays)})
+                        continue
 
-                bg_chr = bg_pick["chr"].astype(str).to_numpy()
-                bg_side = bg_pick["best_side"].astype(str).to_numpy()
-                bg_summit = bg_pick["best_summit_1based"].to_numpy(dtype=np.int64)
-                bg_st1 = np.zeros_like(bg_summit)
-                bg_en1 = np.zeros_like(bg_summit)
-                for i in range(bg_summit.size):
-                    s1, e1 = make_motif_window_1based_relative(int(bg_summit[i]), bg_side[i], rel_range[0], rel_range[1])
-                    bg_st1[i] = s1
-                    bg_en1[i] = e1
-                okb, bg_st1c, bg_en1c = clip_1based_inclusive(bg_chr, bg_st1, bg_en1, chrlen)
-                bg_pick2 = bg_pick.iloc[np.where(okb)[0]].copy()
-                bg_chr2 = bg_chr[okb]
-                bg_st0 = (bg_st1c[okb] - 1).astype(np.int64)
-                bg_en1o = bg_en1c[okb].astype(np.int64)
-                bg_id = (bg_pick2["region_id"].astype(str) + "|" + bg_pick2["best_side"].astype(str)).to_list()
-                bg_bed_df = pd.DataFrame({"chr": bg_chr2, "start0": bg_st0, "end1": bg_en1o, "id": bg_id})
-                bg_bed = os.path.join(outdir, "bed_bg", f"bg.{tag}.bed")
-                write_bed(bg_bed_df, bg_bed)
-                if bg_bed_df.shape[0] == 0:
-                    eprint(f"[WARN] {sm} {cl}: bg windows empty after clipping")
-                    summary_rows.append({
-                        "sample": sm, "cluster": cl, "mode": mode, "note": "skip_bg_windows_empty",
-                        "n_target_arrays": int(n_tar_arrays), "n_target_arrays_kept": int(meta_keep2.shape[0]),
-                        "n_target_windows": int(tar_bed_df.shape[0]), "n_bg_arrays": int(bg_pick.shape[0]), "n_bg_windows": 0
-                    })
-                    continue
+                    if float(args.q_keep) < 1:
+                        cutoff = float(meta_tar["best_score"].quantile(1 - float(args.q_keep)))
+                        meta_keep = meta_tar[meta_tar["best_score"] >= cutoff].copy()
+                    else:
+                        meta_keep = meta_tar.copy()
 
-                eprint(f"[OK] {sm} {cl}: target_arrays={n_tar_arrays}, kept={meta_keep2.shape[0]}, bg_arrays={bg_pick2.shape[0]}")
-                summary_rows.append({
-                    "sample": sm, "cluster": cl, "mode": mode, "note": "ok",
-                    "n_target_arrays": int(n_tar_arrays), "n_target_arrays_kept": int(meta_keep2.shape[0]),
-                    "n_target_windows": int(tar_bed_df.shape[0]), "n_bg_arrays": int(bg_pick2.shape[0]),
-                    "n_bg_windows": int(bg_bed_df.shape[0]), "target_bed": tar_bed, "bg_bed": bg_bed
-                })
-    else:
-        raise RuntimeError(f"Unknown mode: {mode}")
+                    meta_keep = meta_keep.sort_values(["best_score", "region_id"], ascending=[False, True]).reset_index(drop=True)
+                    meta_keep.to_csv(os.path.join(outdir, "meta", f"meta.{base_tag}.tsv"), sep="\t", index=False)
+
+                    if meta_keep.shape[0] == 0:
+                        eprint(f"[SKIP] {sm} {cl}: no target arrays left after q_keep filter")
+                        if do_edge_outside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_outside", "note": "skip_no_arrays_after_qkeep", "n_target_arrays": int(n_tar_arrays)})
+                        if do_edge_inside:
+                            summary_rows.append({"sample": sm, "cluster": cl, "mode": "edge_inside", "note": "skip_no_arrays_after_qkeep", "n_target_arrays": int(n_tar_arrays)})
+                        continue
+
+                    bg_meta_pool = None
+                    bg_pick_shared = None
+
+                    if not args.homer_auto_bg:
+                        df_bg_pool = df_sm[df_sm["cluster"] != cl].copy()
+                        if df_bg_pool.shape[0] == 0:
+                            bg_meta_pool = pd.DataFrame()
+                        else:
+                            b_sL, b_sR = score_edges(
+                                dir_cl,
+                                df_bg_pool["m_outL"].to_numpy(),
+                                df_bg_pool["m_inL"].to_numpy(),
+                                df_bg_pool["m_inR"].to_numpy(),
+                                df_bg_pool["m_outR"].to_numpy(),
+                            )
+                            bg_meta_pool = df_bg_pool[[
+                                "region_id",
+                                "chr",
+                                "start",
+                                "end",
+                                "location",
+                                "summit_L_1based",
+                                "summit_R_1based",
+                            ]].copy()
+                            bg_meta_pool["score_left"] = b_sL
+                            bg_meta_pool["score_right"] = b_sR
+                            bg_meta_pool["best_side"] = np.where(bg_meta_pool["score_left"] >= bg_meta_pool["score_right"], "L", "R")
+                            bg_meta_pool["best_score"] = np.maximum(bg_meta_pool["score_left"], bg_meta_pool["score_right"])
+                            bg_meta_pool["best_summit_1based"] = np.where(
+                                bg_meta_pool["best_side"] == "L",
+                                bg_meta_pool["summit_L_1based"],
+                                bg_meta_pool["summit_R_1based"],
+                            ).astype(np.int64)
+
+                            bg_meta_pool = bg_meta_pool[np.isfinite(bg_meta_pool["best_score"])].copy()
+                            if args.require_positive_score and dir_cl in ("inside_low", "inside_high"):
+                                bg_meta_pool = bg_meta_pool[bg_meta_pool["best_score"] > 0].copy()
+
+                            if args.bg_sampling_strategy == "shared" and bg_meta_pool.shape[0] > 0:
+                                n_bg_need_shared = int(math.ceil(args.bg_multiple * float(meta_keep.shape[0])))
+                                bg_pick_shared = sample_background_regions(
+                                    bg_meta_pool,
+                                    meta_keep,
+                                    n_bg_need_shared,
+                                    args.bg_match_location,
+                                    seed=1,
+                                )
+                                if bg_pick_shared.shape[0] > 0:
+                                    bg_pick_shared.to_csv(
+                                        os.path.join(outdir, "meta", f"meta.{base_tag}.background.shared.tsv"),
+                                        sep="\t",
+                                        index=False,
+                                    )
+
+                    if do_edge_outside:
+                        for bin_idx, rel_a, rel_b, bin_label in outside_bins:
+                            tag = f"{base_tag}.mode_edgeOutside.{bin_label}"
+
+                            tar_keep2, tar_bed_df = build_windows_from_best_side(meta_keep, rel_a, rel_b, chrlen, clip_to_array=False)
+                            tar_bed = os.path.join(outdir, "bed_target", f"target.{tag}.bed")
+                            write_bed(tar_bed_df, tar_bed)
+
+                            if tar_bed_df.shape[0] == 0:
+                                eprint(f"[SKIP] {sm} {cl} outside {bin_label}: no target windows after clipping")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_outside",
+                                    "outside_bin_index": int(bin_idx),
+                                    "outside_bin_label": bin_label,
+                                    "outside_start_bp_bin": int(rel_a),
+                                    "outside_end_bp_bin": int(rel_b),
+                                    "note": "skip_no_target_windows",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(meta_keep.shape[0]),
+                                    "n_target_windows": 0,
+                                })
+                                continue
+
+                            if args.homer_auto_bg:
+                                eprint(f"[OK] {sm} {cl} outside {bin_label}: target_arrays={n_tar_arrays}, kept={tar_keep2.shape[0]}, target_windows={tar_bed_df.shape[0]} (AUTO_BG=1)")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_outside",
+                                    "outside_bin_index": int(bin_idx),
+                                    "outside_bin_label": bin_label,
+                                    "outside_start_bp_bin": int(rel_a),
+                                    "outside_end_bp_bin": int(rel_b),
+                                    "note": "ok_auto_bg",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                    "target_bed": tar_bed,
+                                })
+                                continue
+
+                            if bg_meta_pool is None or bg_meta_pool.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} outside {bin_label}: bg empty after score filtering")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_outside",
+                                    "outside_bin_index": int(bin_idx),
+                                    "outside_bin_label": bin_label,
+                                    "outside_start_bp_bin": int(rel_a),
+                                    "outside_end_bp_bin": int(rel_b),
+                                    "note": "skip_bg_empty_after_filter",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                })
+                                continue
+
+                            if args.bg_sampling_strategy == "shared":
+                                bg_pick = bg_pick_shared.copy() if bg_pick_shared is not None else bg_meta_pool.iloc[0:0].copy()
+                            else:
+                                n_bg_need = int(math.ceil(args.bg_multiple * float(tar_keep2.shape[0])))
+                                bg_pick = sample_background_regions(bg_meta_pool, tar_keep2, n_bg_need, args.bg_match_location, seed=1)
+
+                            if bg_pick.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} outside {bin_label}: bg_pick empty")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_outside",
+                                    "outside_bin_index": int(bin_idx),
+                                    "outside_bin_label": bin_label,
+                                    "outside_start_bp_bin": int(rel_a),
+                                    "outside_end_bp_bin": int(rel_b),
+                                    "note": "skip_bg_pick_empty",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                })
+                                continue
+
+                            bg_pick2, bg_bed_df = build_windows_from_best_side(bg_pick, rel_a, rel_b, chrlen, clip_to_array=False)
+                            bg_bed = os.path.join(outdir, "bed_bg", f"bg.{tag}.bed")
+                            write_bed(bg_bed_df, bg_bed)
+
+                            if bg_bed_df.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} outside {bin_label}: bg windows empty after clipping")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_outside",
+                                    "outside_bin_index": int(bin_idx),
+                                    "outside_bin_label": bin_label,
+                                    "outside_start_bp_bin": int(rel_a),
+                                    "outside_end_bp_bin": int(rel_b),
+                                    "note": "skip_bg_windows_empty",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                    "n_bg_arrays": int(bg_pick.shape[0]),
+                                    "n_bg_windows": 0,
+                                })
+                                continue
+
+                            eprint(f"[OK] {sm} {cl} outside {bin_label}: target_arrays={n_tar_arrays}, kept={tar_keep2.shape[0]}, bg_arrays={bg_pick2.shape[0]}, target_windows={tar_bed_df.shape[0]}, bg_windows={bg_bed_df.shape[0]}")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge_outside",
+                                "outside_bin_index": int(bin_idx),
+                                "outside_bin_label": bin_label,
+                                "outside_start_bp_bin": int(rel_a),
+                                "outside_end_bp_bin": int(rel_b),
+                                "note": "ok",
+                                "n_target_arrays": int(n_tar_arrays),
+                                "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                "n_target_windows": int(tar_bed_df.shape[0]),
+                                "n_bg_arrays": int(bg_pick2.shape[0]),
+                                "n_bg_windows": int(bg_bed_df.shape[0]),
+                                "target_bed": tar_bed,
+                                "bg_bed": bg_bed,
+                            })
+
+                    if do_edge_inside:
+                        for bin_idx, rel_a, rel_b, bin_label in inside_bins:
+                            tag = f"{base_tag}.mode_edgeInside.{bin_label}"
+
+                            tar_keep2, tar_bed_df = build_windows_from_best_side(
+                                meta_keep,
+                                rel_a,
+                                rel_b,
+                                chrlen,
+                                clip_to_array=args.inside_clip_to_array,
+                            )
+                            tar_bed = os.path.join(outdir, "bed_target", f"target.{tag}.bed")
+                            write_bed(tar_bed_df, tar_bed)
+
+                            if tar_bed_df.shape[0] == 0:
+                                eprint(f"[SKIP] {sm} {cl} inside {bin_label}: no target windows after clipping")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_inside",
+                                    "inside_bin_index": int(bin_idx),
+                                    "inside_bin_label": bin_label,
+                                    "inside_start_rel_bin": int(rel_a),
+                                    "inside_end_rel_bin": int(rel_b),
+                                    "note": "skip_no_target_windows",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(meta_keep.shape[0]),
+                                    "n_target_windows": 0,
+                                })
+                                continue
+
+                            if args.homer_auto_bg:
+                                eprint(f"[OK] {sm} {cl} inside {bin_label}: target_arrays={n_tar_arrays}, kept={tar_keep2.shape[0]}, target_windows={tar_bed_df.shape[0]} (AUTO_BG=1)")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_inside",
+                                    "inside_bin_index": int(bin_idx),
+                                    "inside_bin_label": bin_label,
+                                    "inside_start_rel_bin": int(rel_a),
+                                    "inside_end_rel_bin": int(rel_b),
+                                    "note": "ok_auto_bg",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                    "target_bed": tar_bed,
+                                })
+                                continue
+
+                            if bg_meta_pool is None or bg_meta_pool.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} inside {bin_label}: bg empty after score filtering")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_inside",
+                                    "inside_bin_index": int(bin_idx),
+                                    "inside_bin_label": bin_label,
+                                    "inside_start_rel_bin": int(rel_a),
+                                    "inside_end_rel_bin": int(rel_b),
+                                    "note": "skip_bg_empty_after_filter",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                })
+                                continue
+
+                            if args.bg_sampling_strategy == "shared":
+                                bg_pick = bg_pick_shared.copy() if bg_pick_shared is not None else bg_meta_pool.iloc[0:0].copy()
+                            else:
+                                n_bg_need = int(math.ceil(args.bg_multiple * float(tar_keep2.shape[0])))
+                                bg_pick = sample_background_regions(bg_meta_pool, tar_keep2, n_bg_need, args.bg_match_location, seed=1)
+
+                            if bg_pick.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} inside {bin_label}: bg_pick empty")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_inside",
+                                    "inside_bin_index": int(bin_idx),
+                                    "inside_bin_label": bin_label,
+                                    "inside_start_rel_bin": int(rel_a),
+                                    "inside_end_rel_bin": int(rel_b),
+                                    "note": "skip_bg_pick_empty",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                })
+                                continue
+
+                            bg_pick2, bg_bed_df = build_windows_from_best_side(
+                                bg_pick,
+                                rel_a,
+                                rel_b,
+                                chrlen,
+                                clip_to_array=args.inside_clip_to_array,
+                            )
+                            bg_bed = os.path.join(outdir, "bed_bg", f"bg.{tag}.bed")
+                            write_bed(bg_bed_df, bg_bed)
+
+                            if bg_bed_df.shape[0] == 0:
+                                eprint(f"[WARN] {sm} {cl} inside {bin_label}: bg windows empty after clipping")
+                                summary_rows.append({
+                                    "sample": sm,
+                                    "cluster": cl,
+                                    "mode": "edge_inside",
+                                    "inside_bin_index": int(bin_idx),
+                                    "inside_bin_label": bin_label,
+                                    "inside_start_rel_bin": int(rel_a),
+                                    "inside_end_rel_bin": int(rel_b),
+                                    "note": "skip_bg_windows_empty",
+                                    "n_target_arrays": int(n_tar_arrays),
+                                    "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                    "n_target_windows": int(tar_bed_df.shape[0]),
+                                    "n_bg_arrays": int(bg_pick.shape[0]),
+                                    "n_bg_windows": 0,
+                                })
+                                continue
+
+                            eprint(f"[OK] {sm} {cl} inside {bin_label}: target_arrays={n_tar_arrays}, kept={tar_keep2.shape[0]}, bg_arrays={bg_pick2.shape[0]}, target_windows={tar_bed_df.shape[0]}, bg_windows={bg_bed_df.shape[0]}")
+                            summary_rows.append({
+                                "sample": sm,
+                                "cluster": cl,
+                                "mode": "edge_inside",
+                                "inside_bin_index": int(bin_idx),
+                                "inside_bin_label": bin_label,
+                                "inside_start_rel_bin": int(rel_a),
+                                "inside_end_rel_bin": int(rel_b),
+                                "note": "ok",
+                                "n_target_arrays": int(n_tar_arrays),
+                                "n_target_arrays_kept": int(tar_keep2.shape[0]),
+                                "n_target_windows": int(tar_bed_df.shape[0]),
+                                "n_bg_arrays": int(bg_pick2.shape[0]),
+                                "n_bg_windows": int(bg_bed_df.shape[0]),
+                                "target_bed": tar_bed,
+                                "bg_bed": bg_bed,
+                            })
 
     summary_path = os.path.join(outdir, "meta", "build_summary.tsv")
     summary_df = pd.DataFrame(summary_rows)
@@ -1192,10 +2149,26 @@ def main():
         "target_clusters": ",".join(target_clusters),
         "annotation_file": args.annotation_file,
         "tss_near_bp": args.tss_near_bp,
+        "tss_filter_enabled": int(tss_filter_enabled),
         "genome": args.genome,
         "chrom_sizes": args.chrom_sizes,
+        "positions_map_used": positions_map_used_raw,
+        "internal_region_mode": args.internal_region_mode,
+        "internal_nuc_pad_bp": args.internal_nuc_pad_bp,
+        "outside_start_bp": args.outside_start_bp,
+        "outside_end_bp": args.outside_end_bp,
+        "outside_num_bins": args.outside_num_bins,
+        "inside_start_rel": args.inside_start_rel,
+        "inside_end_rel": args.inside_end_rel,
+        "inside_num_bins": args.inside_num_bins,
+        "inside_clip_to_array": int(args.inside_clip_to_array),
         "homer_auto_bg": int(args.homer_auto_bg),
+        "bg_sampling_strategy": args.bg_sampling_strategy,
         "run_known_only": int(args.run_known_only),
+        "rel_range": args.rel_range,
+        "range_offset_bp": args.range_offset_bp,
+        "motif_outside_bp": args.motif_outside_bp,
+        "motif_inside_bp": args.motif_inside_bp,
     }
     pd.DataFrame([meta_info]).to_csv(os.path.join(outdir, "meta", "run_metadata.tsv"), sep="\t", index=False)
 

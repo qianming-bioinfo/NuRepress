@@ -17,19 +17,36 @@ suppressPackageStartupMessages({
 print_help <- function() {
   cat(
 "Usage:
-  Rscript cluster_array_subtype_autoK.R --sample_sheet SAMPLE_SHEET --out_dir OUT_DIR [options]
+  Legacy mode (backward compatible):
+    Rscript cluster_array_subtype_autoK.R --sample_sheet SAMPLE_SHEET --out_dir OUT_DIR [options]
+
+  Explicit map mode (directly provide well-phased array files from previous step):
+    Rscript cluster_array_subtype_autoK.R --samples SAMPLE1,SAMPLE2,... \\
+      --regions_bed_map \"sample1=/path/sample1_wellphased.bed;sample2=/path/sample2_wellphased.bed\" \\
+      --atac_bw_map \"sample1=/path/sample1_atac.bw;sample2=/path/sample2_atac.bw\" \\
+      --out_dir OUT_DIR [options]
 
 Required:
-  --sample_sheet FILE        Tabular sample sheet with columns:
-                             sample, regions_bed, atac_bw
   --out_dir DIR             Output directory
 
+Input mode A (legacy, unchanged):
+  --sample_sheet FILE       Tabular sample sheet with columns:
+                            sample, regions_bed, atac_bw
+
+Input mode B (new explicit mode):
+  --samples STR             Comma-separated sample names
+  --regions_bed_map STR     Semicolon-separated mapping:
+                            sample1=/path/sample1_wellphased.bed;sample2=/path/sample2_wellphased.bed
+  --atac_bw_map STR         Semicolon-separated mapping:
+                            sample1=/path/sample1_atac.bw;sample2=/path/sample2_atac.bw
+
 Optional:
-  --sample_order STR        Comma-separated sample order. Default: sample_sheet order
+  --sample_order STR        Comma-separated sample order. Default:
+                            sample_sheet order (legacy mode) or --samples order (explicit mode)
   --ks STR                  Comma-separated k values to evaluate. Default: 2,3,4,5,6
   --best_k_source STR       Which silhouette curve determines best k:
-                             within_sample | rank | global
-                             Default: within_sample
+                            within_sample | rank | global
+                            Default: within_sample
   --seed INT                Random seed. Default: 1
   --eps FLOAT               Epsilon for log-ratio. Default: 1e-9
   --outside_flank_bp INT    Outside flank length. Default: 1000
@@ -49,12 +66,30 @@ Optional:
   --sample_sheet_delim STR  auto | tab | comma. Default: auto
   -h, --help                Show help
 
-Example:
-  Rscript cluster_array_subtype_autoK.R \
-    --sample_sheet /path/to/sample_sheet.tsv \
-    --out_dir /path/to/output_dir \
-    --sample_order sample1,sample2,sample3 \
-    --ks 2,3,4,5,6
+Array/well-phased region file requirements:
+  - Must be tabular text with at least 3 columns
+  - First 3 columns must be: chr, start, end
+  - 4th column is optional and will be used as region_id if present
+  - Additional columns are allowed
+  - A header line is allowed if its first three fields are like chr/start/end
+
+Examples:
+
+  Legacy mode:
+    Rscript cluster_array_subtype_autoK.R \\
+      --sample_sheet /path/to/sample_sheet.tsv \\
+      --out_dir /path/to/output_dir \\
+      --sample_order sample1,sample2,sample3 \\
+      --ks 2,3,4,5,6
+
+  Explicit map mode:
+    Rscript cluster_array_subtype_autoK.R \\
+      --samples sample1,sample2,sample3 \\
+      --regions_bed_map \"sample1=/path/sample1_wellphased.bed;sample2=/path/sample2_wellphased.bed;sample3=/path/sample3_wellphased.bed\" \\
+      --atac_bw_map \"sample1=/path/sample1_atac.bw;sample2=/path/sample2_atac.bw;sample3=/path/sample3_atac.bw\" \\
+      --out_dir /path/to/output_dir \\
+      --sample_order sample1,sample2,sample3 \\
+      --ks 2,3,4,5,6
 
 Sample sheet example:
   sample\tregions_bed\tatac_bw
@@ -64,10 +99,55 @@ Sample sheet example:
   sep = "")
 }
 
+parse_csv_nonempty <- function(x, arg_name) {
+  if (is.null(x) || !nzchar(trimws(x))) return(NULL)
+  v <- strsplit(x, ",", fixed = TRUE)[[1]]
+  v <- trimws(v)
+  v <- v[nzchar(v)]
+  if (length(v) == 0) stop(arg_name, " is empty after parsing")
+  v
+}
+
+parse_kv_map <- function(x, arg_name) {
+  if (is.null(x) || !nzchar(trimws(x))) return(setNames(character(0), character(0)))
+  parts <- strsplit(x, ";", fixed = TRUE)[[1]]
+  parts <- trimws(parts)
+  parts <- parts[nzchar(parts)]
+  if (length(parts) == 0) stop(arg_name, " is empty after parsing")
+
+  out <- character(length(parts))
+  nm <- character(length(parts))
+
+  for (i in seq_along(parts)) {
+    part <- parts[[i]]
+    if (!grepl("=", part, fixed = TRUE)) {
+      stop(arg_name, " entry lacks '=': ", part)
+    }
+    key <- sub("=.*$", "", part)
+    val <- sub("^[^=]*=", "", part)
+    key <- trimws(key)
+    val <- trimws(val)
+    if (!nzchar(key)) stop(arg_name, " contains empty sample name in entry: ", part)
+    if (!nzchar(val)) stop(arg_name, " contains empty path in entry: ", part)
+    nm[[i]] <- key
+    out[[i]] <- val
+  }
+
+  if (anyDuplicated(nm)) {
+    dup <- unique(nm[duplicated(nm)])
+    stop(arg_name, " has duplicated sample names: ", paste(dup, collapse = ", "))
+  }
+
+  stats::setNames(out, nm)
+}
+
 parse_args <- function(args) {
   opt <- list(
     sample_sheet = NULL,
     out_dir = NULL,
+    samples = NULL,
+    regions_bed_map = NULL,
+    atac_bw_map = NULL,
     sample_order = NULL,
     ks = "2,3,4,5,6",
     best_k_source = "within_sample",
@@ -99,6 +179,9 @@ parse_args <- function(args) {
     switch(key,
       "--sample_sheet" = { opt$sample_sheet <- val; i <- i + 2L },
       "--out_dir" = { opt$out_dir <- val; i <- i + 2L },
+      "--samples" = { opt$samples <- val; i <- i + 2L },
+      "--regions_bed_map" = { opt$regions_bed_map <- val; i <- i + 2L },
+      "--atac_bw_map" = { opt$atac_bw_map <- val; i <- i + 2L },
       "--sample_order" = { opt$sample_order <- val; i <- i + 2L },
       "--ks" = { opt$ks <- val; i <- i + 2L },
       "--best_k_source" = { opt$best_k_source <- val; i <- i + 2L },
@@ -119,9 +202,27 @@ parse_args <- function(args) {
     )
   }
 
-  if (is.null(opt$sample_sheet) || is.null(opt$out_dir)) {
+  if (is.null(opt$out_dir)) {
     print_help()
-    stop("--sample_sheet and --out_dir are required")
+    stop("--out_dir is required")
+  }
+
+  legacy_mode <- !is.null(opt$sample_sheet)
+  explicit_mode <- !is.null(opt$samples) || !is.null(opt$regions_bed_map) || !is.null(opt$atac_bw_map)
+
+  if (!legacy_mode && !explicit_mode) {
+    print_help()
+    stop("Provide either --sample_sheet (legacy mode) OR --samples + --regions_bed_map + --atac_bw_map (explicit mode)")
+  }
+
+  if (legacy_mode && explicit_mode) {
+    stop("Do not mix --sample_sheet with --samples/--regions_bed_map/--atac_bw_map")
+  }
+
+  if (explicit_mode) {
+    if (is.null(opt$samples) || is.null(opt$regions_bed_map) || is.null(opt$atac_bw_map)) {
+      stop("In explicit mode, --samples, --regions_bed_map, and --atac_bw_map are all required")
+    }
   }
 
   opt$best_k_source <- match.arg(opt$best_k_source, c("within_sample", "rank", "global"))
@@ -135,11 +236,10 @@ parse_args <- function(args) {
   opt$ks <- ks
 
   if (!is.null(opt$sample_order)) {
-    so <- strsplit(opt$sample_order, ",", fixed = TRUE)[[1]]
-    so <- trimws(so)
-    so <- so[nzchar(so)]
-    if (length(so) == 0) stop("--sample_order is empty after parsing")
-    opt$sample_order <- so
+    opt$sample_order <- parse_csv_nonempty(opt$sample_order, "--sample_order")
+  }
+  if (!is.null(opt$samples)) {
+    opt$samples <- parse_csv_nonempty(opt$samples, "--samples")
   }
 
   opt
@@ -170,6 +270,37 @@ read_sample_sheet <- function(path, delim_mode = "auto") {
   df
 }
 
+build_samples_from_explicit_maps <- function(opt) {
+  sample_vec <- opt$samples
+  regions_map <- parse_kv_map(opt$regions_bed_map, "--regions_bed_map")
+  atac_map <- parse_kv_map(opt$atac_bw_map, "--atac_bw_map")
+
+  miss_regions <- setdiff(sample_vec, names(regions_map))
+  miss_atac <- setdiff(sample_vec, names(atac_map))
+  extra_regions <- setdiff(names(regions_map), sample_vec)
+  extra_atac <- setdiff(names(atac_map), sample_vec)
+
+  if (length(miss_regions) > 0) {
+    stop("--regions_bed_map is missing samples: ", paste(miss_regions, collapse = ", "))
+  }
+  if (length(miss_atac) > 0) {
+    stop("--atac_bw_map is missing samples: ", paste(miss_atac, collapse = ", "))
+  }
+  if (length(extra_regions) > 0) {
+    stop("--regions_bed_map contains samples absent from --samples: ", paste(extra_regions, collapse = ", "))
+  }
+  if (length(extra_atac) > 0) {
+    stop("--atac_bw_map contains samples absent from --samples: ", paste(extra_atac, collapse = ", "))
+  }
+
+  data.frame(
+    sample = sample_vec,
+    regions_bed = unname(regions_map[sample_vec]),
+    atac_bw = unname(atac_map[sample_vec]),
+    stringsAsFactors = FALSE
+  )
+}
+
 stop_if_missing <- function(p) if (!file.exists(p)) stop("File not found: ", p)
 
 bw_import_as_rlelist <- function(path) {
@@ -193,6 +324,18 @@ bw_import_as_rlelist <- function(path) {
   stop("bw_import_as_rlelist: unsupported import type: ", paste(class(x2), collapse = ", "))
 }
 
+looks_like_header_row <- function(v1, v2, v3) {
+  v1 <- tolower(trimws(as.character(v1)))
+  v2 <- tolower(trimws(as.character(v2)))
+  v3 <- tolower(trimws(as.character(v3)))
+
+  v1_ok <- v1 %in% c("chr", "chrom", "chromosome", "seqnames", "seqname")
+  v2_ok <- v2 %in% c("start", "chromstart", "start_bp", "startpos", "start_position")
+  v3_ok <- v3 %in% c("end", "chromend", "end_bp", "endpos", "end_position")
+
+  isTRUE(v1_ok && v2_ok && v3_ok)
+}
+
 read_bed_any_to_df <- function(bed_path, sample) {
   df <- readr::read_tsv(
     bed_path,
@@ -201,18 +344,55 @@ read_bed_any_to_df <- function(bed_path, sample) {
     show_col_types = FALSE,
     progress = FALSE
   )
-  if (ncol(df) < 3) stop("BED must have >=3 columns: ", bed_path)
-  chr   <- as.character(df[[1]])
-  start <- as.integer(df[[2]])
-  end   <- as.integer(df[[3]])
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+
+  if (ncol(df) < 3) stop("BED/array file must have >=3 columns: ", bed_path)
+
+  if (nrow(df) > 0 && looks_like_header_row(df[[1]][1], df[[2]][1], df[[3]][1])) {
+    df <- df[-1, , drop = FALSE]
+  }
+
+  if (nrow(df) == 0) {
+    return(data.frame(
+      chr = character(0),
+      start = integer(0),
+      end = integer(0),
+      region_id = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  chr   <- trimws(as.character(df[[1]]))
+  start <- suppressWarnings(as.integer(df[[2]]))
+  end   <- suppressWarnings(as.integer(df[[3]]))
   id <- if (ncol(df) >= 4) as.character(df[[4]]) else NA_character_
+
   if (all(is.na(id)) || all(id == "")) {
     id <- paste0(sample, "_region_", seq_along(chr))
   } else {
-    id[id == "" | is.na(id)] <- paste0(sample, "_region_", which(id == "" | is.na(id)))
+    bad_id <- which(id == "" | is.na(id))
+    if (length(bad_id) > 0) {
+      id[bad_id] <- paste0(sample, "_region_", bad_id)
+    }
   }
-  out <- data.frame(chr = chr, start = start, end = end, region_id = id, stringsAsFactors = FALSE)
-  out <- out[is.finite(out$start) & is.finite(out$end) & out$start <= out$end, , drop = FALSE]
+
+  out <- data.frame(
+    chr = chr,
+    start = start,
+    end = end,
+    region_id = id,
+    stringsAsFactors = FALSE
+  )
+
+  out <- out[
+    nzchar(out$chr) &
+      is.finite(out$start) &
+      is.finite(out$end) &
+      out$start <= out$end,
+    ,
+    drop = FALSE
+  ]
+
   out
 }
 
@@ -424,15 +604,22 @@ main <- function() {
   opt <- parse_args(commandArgs(trailingOnly = TRUE))
   dir.create(opt$out_dir, recursive = TRUE, showWarnings = FALSE)
 
-  samples <- read_sample_sheet(opt$sample_sheet, opt$sample_sheet_delim)
+  input_mode <- if (!is.null(opt$sample_sheet)) "sample_sheet" else "explicit_maps"
+
+  samples <- if (input_mode == "sample_sheet") {
+    read_sample_sheet(opt$sample_sheet, opt$sample_sheet_delim)
+  } else {
+    build_samples_from_explicit_maps(opt)
+  }
+
   if (is.null(opt$sample_order)) {
     sample_order <- samples$sample
   } else {
     sample_order <- opt$sample_order
     missing_order <- setdiff(sample_order, samples$sample)
     extra_sheet <- setdiff(samples$sample, sample_order)
-    if (length(missing_order) > 0) stop("sample_order contains values absent from sample_sheet: ", paste(missing_order, collapse = ", "))
-    if (length(extra_sheet) > 0) stop("sample_sheet contains values absent from sample_order: ", paste(extra_sheet, collapse = ", "))
+    if (length(missing_order) > 0) stop("sample_order contains values absent from input samples: ", paste(missing_order, collapse = ", "))
+    if (length(extra_sheet) > 0) stop("input samples contain values absent from sample_order: ", paste(extra_sheet, collapse = ", "))
     samples <- samples[match(sample_order, samples$sample), , drop = FALSE]
   }
 
@@ -442,9 +629,12 @@ main <- function() {
   }
   stopifnot(all(samples$sample == sample_order))
 
+  resolved_input_tsv <- file.path(opt$out_dir, "resolved_input_table.tsv")
+  readr::write_tsv(samples, resolved_input_tsv)
+
   metadata_file <- file.path(opt$out_dir, "run_metadata.txt")
-  writeLines(c(
-    paste0("sample_sheet=", normalizePath(opt$sample_sheet, winslash = "/", mustWork = FALSE)),
+  meta_lines <- c(
+    paste0("input_mode=", input_mode),
     paste0("out_dir=", normalizePath(opt$out_dir, winslash = "/", mustWork = FALSE)),
     paste0("sample_order=", paste(sample_order, collapse = ",")),
     paste0("ks=", paste(opt$ks, collapse = ",")),
@@ -458,8 +648,26 @@ main <- function() {
     paste0("sr_min_regions_per_cluster_meta=", opt$sr_min_regions_per_cluster_meta),
     paste0("sr_max_regions_per_cluster_meta=", opt$sr_max_regions_per_cluster_meta),
     paste0("sil_subsample_n=", opt$sil_subsample_n),
-    paste0("mclust_max_fit_n=", opt$mclust_max_fit_n)
-  ), con = metadata_file)
+    paste0("mclust_max_fit_n=", opt$mclust_max_fit_n),
+    paste0("resolved_input_table=", normalizePath(resolved_input_tsv, winslash = "/", mustWork = FALSE))
+  )
+
+  if (input_mode == "sample_sheet") {
+    meta_lines <- c(
+      meta_lines,
+      paste0("sample_sheet=", normalizePath(opt$sample_sheet, winslash = "/", mustWork = FALSE)),
+      paste0("sample_sheet_delim=", opt$sample_sheet_delim)
+    )
+  } else {
+    meta_lines <- c(
+      meta_lines,
+      paste0("samples=", paste(opt$samples, collapse = ",")),
+      paste0("regions_bed_map=", opt$regions_bed_map),
+      paste0("atac_bw_map=", opt$atac_bw_map)
+    )
+  }
+
+  writeLines(meta_lines, con = metadata_file)
 
   message(">>> [1] Read BEDs and compute ATAC_inside/left/right from bigWig")
 
@@ -472,7 +680,7 @@ main <- function() {
     message("  - sample: ", ct)
 
     bed_df <- read_bed_any_to_df(samples$regions_bed[i], ct)
-    if (nrow(bed_df) == 0) stop("Empty BED for sample: ", ct)
+    if (nrow(bed_df) == 0) stop("Empty BED/array file for sample: ", ct)
 
     message("    importing ATAC bw as RleList: ", samples$atac_bw[i])
     atac_cov <- bw_import_as_rlelist(samples$atac_bw[i])
@@ -886,6 +1094,7 @@ main <- function() {
 
   message("=== ALL DONE ===")
   message("Output dir: ", opt$out_dir)
+  message("Input mode: ", input_mode)
   message("Best k source: ", opt$best_k_source)
   message("Best k: ", best_k)
   message("Best-k table: ", file.path(opt$out_dir, "best_k_selection.tsv"))

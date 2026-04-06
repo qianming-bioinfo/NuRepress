@@ -34,6 +34,10 @@ Optional modules:
   --ref_fa FILE              Indexed reference FASTA for GC module (requires .fai)
   --chunk_size INT           GC extraction chunk size. Default: 50000
   --peak_sheet FILE          TSV with columns: sample, peak_bed
+                             peak_bed may be bed/narrowPeak/broadPeak/gappedPeak/scoreisland
+                             Blank/NA/null means skipping that sample
+  --skip_peak_module STR     true|false. Default: false
+  --peak_start_is_0based STR true|false. Default: true
   --min_overlap_frac_region FLOAT
                              Peak module threshold. Default: 0.30
   --boundary_frac FLOAT      Peak boundary-zone fraction. Default: 0.10
@@ -52,28 +56,34 @@ Other:
   -h, --help                Show help
 
 Examples:
-  Rscript describe_array_subtype.R \
-    --cluster_tsv /path/to/cluster_tables/k3_cluster_assignment.z1z2.within_sample_scaled.tsv \
+  Rscript describe_array_subtype.R \\
+    --cluster_tsv /path/to/cluster_tables/k3_cluster_assignment.z1z2.within_sample_scaled.tsv \\
     --out_dir /path/to/array_subtype_description
 
-  Rscript describe_array_subtype.R \
-    --cluster_tsv /path/to/cluster_tables/k3_cluster_assignment.z1z2.within_sample_scaled.tsv \
-    --out_dir /path/to/array_subtype_description \
-    --gtf /path/to/annotation.gtf \
-    --ref_fa /path/to/genome.fa \
-    --peak_sheet /path/to/peak_sheet.tsv \
-    --region_stats_sheet /path/to/region_stats_sheet.tsv \
+  Rscript describe_array_subtype.R \\
+    --cluster_tsv /path/to/cluster_tables/k3_cluster_assignment.z1z2.within_sample_scaled.tsv \\
+    --out_dir /path/to/array_subtype_description \\
+    --gtf /path/to/annotation.gtf \\
+    --ref_fa /path/to/genome.fa \\
+    --peak_sheet /path/to/peak_sheet.tsv \\
+    --region_stats_sheet /path/to/region_stats_sheet.tsv \\
     --union_long_tsv /path/to/union_long.mapped.tsv
 
+  Rscript describe_array_subtype.R \\
+    --cluster_tsv /path/to/cluster_tables/k3_cluster_assignment.z1z2.within_sample_scaled.tsv \\
+    --out_dir /path/to/array_subtype_description \\
+    --skip_peak_module true
+
 region_stats_sheet format:
-  sample\tstats_tsv
-  sample1\t/path/to/sample1.phased_regions.stats.tsv
-  sample2\t/path/to/sample2.phased_regions.stats.tsv
+  sample\\tstats_tsv
+  sample1\\t/path/to/sample1.phased_regions.stats.tsv
+  sample2\\t/path/to/sample2.phased_regions.stats.tsv
 
 peak_sheet format:
-  sample\tpeak_bed
-  sample1\t/path/to/sample1_peaks.bed
-  sample2\t/path/to/sample2_peaks.bed
+  sample\\tpeak_bed
+  sample1\\t/path/to/sample1_peaks.bed
+  sample2\\t/path/to/sample2.scoreisland
+  sample3\\tNA
 ",
     sep = ""
   )
@@ -100,6 +110,14 @@ split_csv <- function(x, mode = c("character", "integer", "numeric")) {
 }
 
 parse_args <- function(args) {
+  normalize_nullable <- function(x) {
+    if (is.null(x)) return(NULL)
+    x <- trimws(as.character(x))
+    if (!nzchar(x)) return(NULL)
+    if (tolower(x) %in% c("na", "null", "none")) return(NULL)
+    x
+  }
+
   opt <- list(
     cluster_tsv = NULL,
     out_dir = NULL,
@@ -113,6 +131,8 @@ parse_args <- function(args) {
     ref_fa = NULL,
     chunk_size = 50000L,
     peak_sheet = NULL,
+    skip_peak_module = FALSE,
+    peak_start_is_0based = TRUE,
     min_overlap_frac_region = 0.30,
     boundary_frac = 0.10,
     region_start_is_0based = TRUE,
@@ -148,6 +168,8 @@ parse_args <- function(args) {
       "--ref_fa" = { opt$ref_fa <- val; i <- i + 2L },
       "--chunk_size" = { opt$chunk_size <- as.integer(val); i <- i + 2L },
       "--peak_sheet" = { opt$peak_sheet <- val; i <- i + 2L },
+      "--skip_peak_module" = { opt$skip_peak_module <- parse_bool(val); i <- i + 2L },
+      "--peak_start_is_0based" = { opt$peak_start_is_0based <- parse_bool(val); i <- i + 2L },
       "--min_overlap_frac_region" = { opt$min_overlap_frac_region <- as.numeric(val); i <- i + 2L },
       "--boundary_frac" = { opt$boundary_frac <- as.numeric(val); i <- i + 2L },
       "--region_start_is_0based" = { opt$region_start_is_0based <- parse_bool(val); i <- i + 2L },
@@ -165,6 +187,11 @@ parse_args <- function(args) {
     print_help()
     stop("--cluster_tsv and --out_dir are required")
   }
+
+  for (nm in c("region_stats_sheet", "gtf", "ref_fa", "peak_sheet", "union_long_tsv")) {
+    opt[[nm]] <- normalize_nullable(opt[[nm]])
+  }
+
   opt
 }
 
@@ -445,7 +472,18 @@ build_id2gene_map_from_gtf <- function(gtf_file, id_type = c("transcript", "gene
 }
 
 make_tss_gr <- function(gtf_file, use_transcript = TRUE) {
-  txdb <- GenomicFeatures::makeTxDbFromGFF(gtf_file, format = ifelse(grepl("\\.gff", gtf_file, ignore.case = TRUE), "gff3", "gtf"))
+  txdb <- if (requireNamespace("txdbmaker", quietly = TRUE)) {
+    txdbmaker::makeTxDbFromGFF(
+      gtf_file,
+      format = ifelse(grepl("\\.gff", gtf_file, ignore.case = TRUE), "gff3", "gtf")
+    )
+  } else {
+    GenomicFeatures::makeTxDbFromGFF(
+      gtf_file,
+      format = ifelse(grepl("\\.gff", gtf_file, ignore.case = TRUE), "gff3", "gtf")
+    )
+  }
+
   if (use_transcript) {
     tx <- GenomicFeatures::transcripts(txdb)
     tss <- GenomicRanges::promoters(tx, upstream = 0, downstream = 1)
@@ -668,22 +706,161 @@ calc_gc_from_fasta <- function(df_cluster, ref_fa, out_dir, opt) {
   invisible(df_out)
 }
 
+read_peak_like_table <- function(path, peak_start_is_0based = TRUE) {
+  x <- tryCatch(
+    readr::read_tsv(
+      path,
+      col_names = FALSE,
+      comment = "#",
+      show_col_types = FALSE,
+      progress = FALSE
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(x)) {
+    stop("Cannot read peak-like file as tabular text: ", path)
+  }
+  x <- as.data.frame(x, stringsAsFactors = FALSE)
+
+  if (ncol(x) < 3) {
+    stop("Peak-like file has fewer than 3 columns: ", path)
+  }
+
+  colnames(x)[1:3] <- c("chr", "start", "end")
+
+  chr <- trimws(as.character(x$chr))
+  st <- suppressWarnings(as.integer(as.character(x$start)))
+  ed <- suppressWarnings(as.integer(as.character(x$end)))
+
+  keep <- !is.na(chr) & nzchar(chr) & !is.na(st) & !is.na(ed)
+  x <- x[keep, , drop = FALSE]
+  if (nrow(x) == 0L) return(GenomicRanges::GRanges())
+
+  st <- suppressWarnings(as.integer(as.character(x$start)))
+  ed <- suppressWarnings(as.integer(as.character(x$end)))
+  if (peak_start_is_0based) st <- st + 1L
+
+  keep2 <- !is.na(st) & !is.na(ed) & st <= ed
+  if (!any(keep2)) return(GenomicRanges::GRanges())
+
+  gr <- GenomicRanges::GRanges(
+    seqnames = as.character(x$chr[keep2]),
+    ranges = IRanges::IRanges(start = st[keep2], end = ed[keep2])
+  )
+
+  extra_cols <- x[keep2, setdiff(colnames(x), c("chr", "start", "end")), drop = FALSE]
+  if (ncol(extra_cols) > 0) {
+    extra_cols[] <- lapply(extra_cols, function(v) {
+      if (is.character(v)) trimws(v) else v
+    })
+    S4Vectors::mcols(gr) <- S4Vectors::DataFrame(extra_cols)
+  }
+
+  gr
+}
+
+import_peak_any <- function(path, peak_start_is_0based = TRUE) {
+  if (is.null(path)) return(GenomicRanges::GRanges())
+  path <- trimws(as.character(path))
+  if (!nzchar(path) || tolower(path) %in% c("na", "null", "none")) {
+    return(GenomicRanges::GRanges())
+  }
+  stop_if_missing(path)
+
+  path_low <- tolower(path)
+
+  bed_like_ext <- grepl("\\.(bed|narrowpeak|broadpeak|gappedpeak)(\\.gz)?$", path_low)
+  scoreisland_ext <- grepl("\\.scoreisland(\\.gz)?$", path_low)
+
+  if (scoreisland_ext) {
+    gr <- tryCatch(
+      rtracklayer::import(path, format = "BED"),
+      error = function(e) NULL
+    )
+    if (!is.null(gr)) return(gr)
+
+    return(read_peak_like_table(path, peak_start_is_0based = peak_start_is_0based))
+  }
+
+  if (bed_like_ext) {
+    gr <- tryCatch(
+      rtracklayer::import(path, format = "BED"),
+      error = function(e) NULL
+    )
+    if (!is.null(gr)) return(gr)
+
+    return(read_peak_like_table(path, peak_start_is_0based = peak_start_is_0based))
+  }
+
+  gr <- tryCatch(
+    rtracklayer::import(path),
+    error = function(e) NULL
+  )
+  if (!is.null(gr)) return(gr)
+
+  gr <- tryCatch(
+    rtracklayer::import(path, format = "BED"),
+    error = function(e) NULL
+  )
+  if (!is.null(gr)) return(gr)
+
+  read_peak_like_table(path, peak_start_is_0based = peak_start_is_0based)
+}
+
 read_peak_sheet <- function(path) {
   df <- read_sheet_auto(path)
-  req <- c("sample", "peak_bed")
-  miss <- setdiff(req, colnames(df))
-  if (length(miss) > 0) stop("peak_sheet missing columns: ", paste(miss, collapse = ", "))
-  for (p in df$peak_bed) stop_if_missing(p)
+
+  if (!"sample" %in% colnames(df)) {
+    stop("peak_sheet missing required column: sample")
+  }
+
+  peak_col <- NULL
+  if ("peak_bed" %in% colnames(df)) {
+    peak_col <- "peak_bed"
+  } else if ("peak_file" %in% colnames(df)) {
+    peak_col <- "peak_file"
+  } else {
+    stop("peak_sheet must contain column 'peak_bed' or 'peak_file'")
+  }
+
+  df <- df %>%
+    mutate(
+      sample = trimws(as.character(sample)),
+      peak_bed = trimws(as.character(.data[[peak_col]]))
+    ) %>%
+    select(sample, peak_bed)
+
+  df$peak_bed[!nzchar(df$peak_bed)] <- NA_character_
+  df$peak_bed[tolower(df$peak_bed) %in% c("na", "null", "none")] <- NA_character_
+
+  bad <- !is.na(df$peak_bed) & !file.exists(df$peak_bed)
+  if (any(bad)) {
+    stop(
+      "Some peak files in peak_sheet do not exist:\n",
+      paste0("  - ", df$sample[bad], ": ", df$peak_bed[bad], collapse = "\n")
+    )
+  }
+
   df
 }
 
-annotate_peak_positions_one_sample <- function(df_sample, peaks_bed_path, sample_name, region_start_is_0based = TRUE, boundary_frac = 0.10) {
+annotate_peak_positions_one_sample <- function(df_sample,
+                                               peaks_bed_path,
+                                               sample_name,
+                                               region_start_is_0based = TRUE,
+                                               boundary_frac = 0.10,
+                                               peak_start_is_0based = TRUE) {
   gr_reg <- GenomicRanges::GRanges(
     seqnames = df_sample$chr,
-    ranges = IRanges::IRanges(start = if (region_start_is_0based) as.integer(df_sample$start) + 1L else as.integer(df_sample$start),
-                              end = as.integer(df_sample$end))
+    ranges = IRanges::IRanges(
+      start = if (region_start_is_0based) as.integer(df_sample$start) + 1L else as.integer(df_sample$start),
+      end = as.integer(df_sample$end)
+    )
   )
-  gr_peak <- rtracklayer::import(peaks_bed_path)
+
+  gr_peak <- import_peak_any(peaks_bed_path, peak_start_is_0based = peak_start_is_0based)
+
   if (length(gr_peak) == 0L) {
     return(df_sample %>% mutate(
       sample = sample_name,
@@ -710,13 +887,18 @@ annotate_peak_positions_one_sample <- function(df_sample, peaks_bed_path, sample
   n_reg <- length(gr_reg)
   best_peak_idx <- rep(NA_integer_, n_reg)
   best_ov_bp <- rep(0L, n_reg)
+
   if (length(hits) > 0L) {
     qh <- S4Vectors::queryHits(hits)
     sh <- S4Vectors::subjectHits(hits)
-    ov_ir <- IRanges::pintersect(gr_reg[qh], gr_peak[sh], ignore.strand = TRUE)
-    ov_bp <- GenomicRanges::width(ov_ir)
+    ov_ir <- IRanges::pintersect(GenomicRanges::ranges(gr_reg[qh]), GenomicRanges::ranges(gr_peak[sh]))
+    ov_bp <- IRanges::width(ov_ir)
+
     best <- tibble(region_idx = qh, peak_idx = sh, ov_bp = ov_bp) %>%
-      group_by(region_idx) %>% slice_max(order_by = ov_bp, n = 1, with_ties = FALSE) %>% ungroup()
+      group_by(region_idx) %>%
+      slice_max(order_by = ov_bp, n = 1, with_ties = FALSE) %>%
+      ungroup()
+
     best_peak_idx[best$region_idx] <- best$peak_idx
     best_ov_bp[best$region_idx] <- best$ov_bp
   }
@@ -736,26 +918,37 @@ annotate_peak_positions_one_sample <- function(df_sample, peaks_bed_path, sample
 
   denom <- rep(NA_real_, n_reg)
   denom[ok] <- pmax((peak_end[ok] - peak_start[ok]), 1)
+
   clamp01 <- function(x) pmin(pmax(x, 0), 1)
+
   center_norm_raw <- rep(NA_real_, n_reg)
   pos_start_norm_raw <- rep(NA_real_, n_reg)
   pos_end_norm_raw <- rep(NA_real_, n_reg)
+
   center_norm_raw[ok] <- (reg_center[ok] - peak_start[ok]) / denom[ok]
   pos_start_norm_raw[ok] <- (reg_start[ok] - peak_start[ok]) / denom[ok]
   pos_end_norm_raw[ok] <- (reg_end[ok] - peak_start[ok]) / denom[ok]
+
   center_in_peak <- !is.na(center_norm_raw) & center_norm_raw >= 0 & center_norm_raw <= 1
+
   center_norm <- pos_start_norm <- pos_end_norm <- rep(NA_real_, n_reg)
   center_norm[ok] <- clamp01(center_norm_raw[ok])
   pos_start_norm[ok] <- clamp01(pos_start_norm_raw[ok])
   pos_end_norm[ok] <- clamp01(pos_end_norm_raw[ok])
+
   edge_proximity <- rep(NA_real_, n_reg)
   edge_proximity[ok] <- pmin(center_norm[ok], 1 - center_norm[ok])
+
   edge_touch_norm <- rep(NA_real_, n_reg)
   edge_touch_norm[ok] <- pmin(pos_start_norm[ok], 1 - pos_end_norm[ok])
   edge_touch_norm[ok] <- clamp01(edge_touch_norm[ok])
+
   overlap_frac_region <- rep(NA_real_, n_reg)
   overlap_frac_region[ok] <- best_ov_bp[ok] / reg_width[ok]
-  in_boundary_zone <- center_in_peak & (center_norm_raw <= boundary_frac | center_norm_raw >= (1 - boundary_frac))
+
+  in_boundary_zone <- center_in_peak & (
+    center_norm_raw <= boundary_frac | center_norm_raw >= (1 - boundary_frac)
+  )
 
   df_sample %>% mutate(
     sample = sample_name,
@@ -780,25 +973,68 @@ annotate_peak_positions_one_sample <- function(df_sample, peaks_bed_path, sample
 
 run_peak_module <- function(df_cluster, peak_sheet, out_dir, opt) {
   require_bioc_pkgs(c("GenomicRanges", "IRanges", "rtracklayer", "S4Vectors"))
+
+  if (isTRUE(opt$skip_peak_module)) {
+    message(">>> Peak module skipped by --skip_peak_module true")
+    return(invisible(NULL))
+  }
+  if (is.null(peak_sheet) || !nzchar(trimws(peak_sheet))) {
+    message(">>> Peak module skipped because --peak_sheet is empty")
+    return(invisible(NULL))
+  }
+
   mod_dir <- file.path(out_dir, "05_peak_relative_position")
   ensure_dir(mod_dir)
-  sh <- read_peak_sheet(peak_sheet)
-  sample_order <- levels(df_cluster$sample)
 
+  sh <- read_peak_sheet(peak_sheet)
+  if (nrow(sh) == 0L) {
+    message(">>> Peak module skipped because peak_sheet has no rows")
+    return(invisible(NULL))
+  }
+
+  sample_order <- levels(df_cluster$sample)
   res_list <- list()
+
   for (s in sample_order) {
     df_s <- df_cluster %>% filter(as.character(sample) == s)
     if (nrow(df_s) == 0) next
-    row_s <- sh[sh$sample == s, , drop = FALSE]
-    if (nrow(row_s) == 0) next
-    res_list[[s]] <- annotate_peak_positions_one_sample(df_s, row_s$peak_bed[[1]], s, opt$region_start_is_0based, opt$boundary_frac)
-  }
-  df_pos <- bind_rows(res_list)
-  if (nrow(df_pos) == 0) return(invisible(NULL))
 
-  df_overlap <- df_pos %>% filter(has_peak_overlap, !is.na(overlap_frac_region), overlap_frac_region >= opt$min_overlap_frac_region)
-  df_center <- df_overlap %>% filter(center_in_peak, !is.na(center_norm_raw))
-  df_edge <- df_overlap %>% filter(!is.na(edge_touch_norm), !is.na(cluster))
+    row_s <- sh[sh$sample == s, , drop = FALSE]
+    if (nrow(row_s) == 0) {
+      message(">>> Peak module: sample skipped because not found in peak_sheet: ", s)
+      next
+    }
+
+    peak_path <- row_s$peak_bed[[1]]
+    if (is.na(peak_path) || !nzchar(trimws(peak_path))) {
+      message(">>> Peak module: sample skipped because peak path is empty: ", s)
+      next
+    }
+
+    res_list[[s]] <- annotate_peak_positions_one_sample(
+      df_s,
+      peak_path,
+      s,
+      region_start_is_0based = opt$region_start_is_0based,
+      boundary_frac = opt$boundary_frac,
+      peak_start_is_0based = opt$peak_start_is_0based
+    )
+  }
+
+  df_pos <- bind_rows(res_list)
+  if (nrow(df_pos) == 0) {
+    message(">>> Peak module finished with no valid samples to process")
+    return(invisible(NULL))
+  }
+
+  df_overlap <- df_pos %>%
+    filter(has_peak_overlap, !is.na(overlap_frac_region), overlap_frac_region >= opt$min_overlap_frac_region)
+
+  df_center <- df_overlap %>%
+    filter(center_in_peak, !is.na(center_norm_raw))
+
+  df_edge <- df_overlap %>%
+    filter(!is.na(edge_touch_norm), !is.na(cluster))
 
   write_table(df_pos, file.path(mod_dir, "region_peak_position.all.tsv"))
   write_table(df_overlap, file.path(mod_dir, paste0("region_peak_position.overlapFracGe", opt$min_overlap_frac_region, ".tsv")))
@@ -825,52 +1061,63 @@ run_peak_module <- function(df_cluster, peak_sheet, out_dir, opt) {
     )
   write_table(df_summary, file.path(mod_dir, paste0("summary_by_sample_cluster.overlapFracGe", opt$min_overlap_frac_region, ".boundary", opt$boundary_frac, ".tsv")))
 
-  df_wilcox <- df_edge %>%
-    group_by(sample) %>%
-    summarise(
-      n_C1 = sum(cluster == levels(df_cluster$cluster)[1]),
-      n_C2 = sum(cluster == levels(df_cluster$cluster)[2]),
-      p_value = {
-        x <- edge_touch_norm[cluster == levels(df_cluster$cluster)[1]]
-        y <- edge_touch_norm[cluster == levels(df_cluster$cluster)[2]]
-        if (length(x) >= 5 && length(y) >= 5) wilcox.test(x, y)$p.value else NA_real_
-      },
-      median_C1 = median(edge_touch_norm[cluster == levels(df_cluster$cluster)[1]], na.rm = TRUE),
-      median_C2 = median(edge_touch_norm[cluster == levels(df_cluster$cluster)[2]], na.rm = TRUE),
-      .groups = "drop"
-    )
-  write_table(df_wilcox, file.path(mod_dir, paste0("wilcox_cluster1_vs_cluster2_edgeTouch.overlapFracGe", opt$min_overlap_frac_region, ".tsv")))
+  if (length(levels(df_cluster$cluster)) >= 2) {
+    c1 <- levels(df_cluster$cluster)[1]
+    c2 <- levels(df_cluster$cluster)[2]
 
-  if (nrow(df_center) > 0 && length(levels(df_cluster$cluster)) >= 2) {
-    df_fisher <- df_center %>%
+    df_wilcox <- df_edge %>%
       group_by(sample) %>%
       summarise(
-        A_boundary = sum(cluster == levels(df_cluster$cluster)[1] & in_boundary_zone),
-        A_nonboundary = sum(cluster == levels(df_cluster$cluster)[1] & !in_boundary_zone),
-        B_boundary = sum(cluster == levels(df_cluster$cluster)[2] & in_boundary_zone),
-        B_nonboundary = sum(cluster == levels(df_cluster$cluster)[2] & !in_boundary_zone),
+        n_C1 = sum(cluster == c1),
+        n_C2 = sum(cluster == c2),
         p_value = {
-          m <- matrix(c(A_boundary, A_nonboundary, B_boundary, B_nonboundary), nrow = 2, byrow = TRUE)
-          if (all(m >= 0) && sum(m) > 0) fisher.test(m)$p.value else NA_real_
+          x <- edge_touch_norm[cluster == c1]
+          y <- edge_touch_norm[cluster == c2]
+          if (length(x) >= 5 && length(y) >= 5) wilcox.test(x, y)$p.value else NA_real_
         },
+        median_C1 = median(edge_touch_norm[cluster == c1], na.rm = TRUE),
+        median_C2 = median(edge_touch_norm[cluster == c2], na.rm = TRUE),
         .groups = "drop"
       )
-    write_table(df_fisher, file.path(mod_dir, paste0("fisher_cluster1_vs_cluster2_boundaryZone.centerInPeak.overlapFracGe", opt$min_overlap_frac_region, ".boundary", opt$boundary_frac, ".tsv")))
+    write_table(df_wilcox, file.path(mod_dir, paste0("wilcox_cluster1_vs_cluster2_edgeTouch.overlapFracGe", opt$min_overlap_frac_region, ".tsv")))
+
+    if (nrow(df_center) > 0) {
+      df_fisher <- df_center %>%
+        group_by(sample) %>%
+        summarise(
+          A_boundary = sum(cluster == c1 & in_boundary_zone),
+          A_nonboundary = sum(cluster == c1 & !in_boundary_zone),
+          B_boundary = sum(cluster == c2 & in_boundary_zone),
+          B_nonboundary = sum(cluster == c2 & !in_boundary_zone),
+          p_value = {
+            m <- matrix(c(A_boundary, A_nonboundary, B_boundary, B_nonboundary), nrow = 2, byrow = TRUE)
+            if (all(m >= 0) && sum(m) > 0) fisher.test(m)$p.value else NA_real_
+          },
+          .groups = "drop"
+        )
+      write_table(df_fisher, file.path(mod_dir, paste0("fisher_cluster1_vs_cluster2_boundaryZone.centerInPeak.overlapFracGe", opt$min_overlap_frac_region, ".boundary", opt$boundary_frac, ".tsv")))
+    }
   }
 
-  p_center <- ggplot(df_center, aes(x = center_norm_raw, color = cluster)) +
-    geom_density(linewidth = 0.8, adjust = 1) +
-    facet_wrap(~ sample, nrow = 1) +
-    theme_bw() +
-    labs(title = "Center position of regions within peaks", x = "center_norm_raw", y = "Density")
-  if (nrow(df_center) > 0) ggsave(file.path(mod_dir, paste0("density_center_norm_raw.centerInPeak.overlapFracGe", opt$min_overlap_frac_region, ".pdf")), p_center, width = 12, height = 4)
+  if (nrow(df_center) > 0) {
+    p_center <- ggplot(df_center, aes(x = center_norm_raw, color = cluster)) +
+      geom_density(linewidth = 0.8, adjust = 1) +
+      facet_wrap(~ sample, nrow = 1) +
+      theme_bw() +
+      labs(title = "Center position of regions within peaks", x = "center_norm_raw", y = "Density")
+    ggsave(file.path(mod_dir, paste0("density_center_norm_raw.centerInPeak.overlapFracGe", opt$min_overlap_frac_region, ".pdf")), p_center, width = 12, height = 4)
+  }
 
-  p_edge <- ggplot(df_edge, aes(x = cluster, y = edge_touch_norm, fill = cluster)) +
-    geom_violin(trim = TRUE) + geom_boxplot(width = 0.2, outlier.size = 0.35) +
-    facet_wrap(~ sample, nrow = 1, scales = "free_y") + theme_bw() +
-    theme(legend.position = "none") +
-    labs(title = "Edge-touch of regions within peaks", x = "Cluster", y = "edge_touch_norm")
-  if (nrow(df_edge) > 0) ggsave(file.path(mod_dir, paste0("violin_edge_touch_norm.overlapFracGe", opt$min_overlap_frac_region, ".pdf")), p_edge, width = 12, height = 4)
+  if (nrow(df_edge) > 0) {
+    p_edge <- ggplot(df_edge, aes(x = cluster, y = edge_touch_norm, fill = cluster)) +
+      geom_violin(trim = TRUE) +
+      geom_boxplot(width = 0.2, outlier.size = 0.35) +
+      facet_wrap(~ sample, nrow = 1, scales = "free_y") +
+      theme_bw() +
+      theme(legend.position = "none") +
+      labs(title = "Edge-touch of regions within peaks", x = "Cluster", y = "edge_touch_norm")
+    ggsave(file.path(mod_dir, paste0("violin_edge_touch_norm.overlapFracGe", opt$min_overlap_frac_region, ".pdf")), p_edge, width = 12, height = 4)
+  }
 
   invisible(df_pos)
 }
@@ -1016,6 +1263,8 @@ write_metadata <- function(opt, out_dir, detected_cluster_col, sample_order) {
     paste0("gtf=", ifelse(is.null(opt$gtf), "NA", normalizePath(opt$gtf, mustWork = FALSE))),
     paste0("ref_fa=", ifelse(is.null(opt$ref_fa), "NA", normalizePath(opt$ref_fa, mustWork = FALSE))),
     paste0("peak_sheet=", ifelse(is.null(opt$peak_sheet), "NA", normalizePath(opt$peak_sheet, mustWork = FALSE))),
+    paste0("skip_peak_module=", opt$skip_peak_module),
+    paste0("peak_start_is_0based=", opt$peak_start_is_0based),
     paste0("union_long_tsv=", ifelse(is.null(opt$union_long_tsv), "NA", normalizePath(opt$union_long_tsv, mustWork = FALSE)))
   )
   readr::write_lines(lines, file.path(out_dir, "run_metadata.txt"))
@@ -1052,7 +1301,9 @@ main <- function() {
     calc_gc_from_fasta(df_cluster, opt$ref_fa, opt$out_dir, opt)
   }
 
-  if (!is.null(opt$peak_sheet)) {
+  if (isTRUE(opt$skip_peak_module)) {
+    message(">>> [5] Peak-relative position [SKIPPED]")
+  } else if (!is.null(opt$peak_sheet)) {
     message(">>> [5] Peak-relative position")
     run_peak_module(df_cluster, opt$peak_sheet, opt$out_dir, opt)
   }
