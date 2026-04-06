@@ -106,64 +106,6 @@ It produces:
 
 ---
 
-## Quick start
-
-### Full workflow with control BAMs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps nucleosome,array,cluster,describe,motif,score \
-  --samples sample1,sample2,sample3 \
-  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
-  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
-  --control_map "sample1=/path/to/sample1.input.bam;sample2=/path/to/sample2.input.bam;sample3=/path/to/sample3.input.bam" \
-  --genome hg38 \
-  --genome_fasta /path/to/genome.fa \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --annotation_gtf /path/to/annotation.gtf \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Full workflow without control BAMs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps nucleosome,array,cluster,describe,motif,score \
-  --samples sample1,sample2,sample3 \
-  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
-  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
-  --genome hg38 \
-  --genome_fasta /path/to/genome.fa \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --annotation_gtf /path/to/annotation.gtf \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Rerun only motif and score using existing outputs
-
-```bash
-run_nurepress_cli.py run \
-  --out_dir /path/to/output \
-  --steps motif,score \
-  --samples sample1,sample2,sample3 \
-  --annotation_gtf /path/to/annotation.gtf \
-  --chrom_sizes /path/to/genome.chrom.sizes \
-  --genome hg38 \
-  --expr_tsv /path/to/expression.tsv
-```
-
-### Rerun only score using existing describe and motif outputs
-
-```bash
-run_nurepress_cli.py score \
-  --out_dir /path/to/output \
-  --expr_tsv /path/to/expression.tsv
-```
-
----
-
 
 ## Repository contents
 
@@ -825,6 +767,148 @@ Output:
 This directory contains the final TF ranking tables and related plotting outputs.
 
 ---
+## Running demo
+
+A small test dataset is provided for quickly checking whether the NuRepress CLI and its main modules can run correctly in a local or HPC environment.
+
+**Test data download:**  
+[Download test dataset](https://drive.google.com/file/d/11-zdj8t9-yVvOU74_zA5lKwXIUIoNucF/view?usp=sharing)
+
+
+After downloading, place the test files in a directory of your choice. In the examples below, we assume the files are stored under:
+
+`/path/to/test_data/`
+
+and outputs are written to:
+
+`/path/to/test_data_out/`
+
+---
+
+### 1. Minimal test run
+
+```bash
+This example runs the first two upstream steps on the small test dataset:
+
+run_nurepress_cli.py run \
+  --out_dir /path/to/test_data_out \
+  --steps nucleosome,array \
+  --samples sample1,sample2,sample3 \
+  --atac_bw_map "sample1=/path/to/sample1.Tn5.insertion.CPM.bw;sample2=/path/to/sample2.Tn5.insertion.CPM.bw;sample3=/path/to/sample3.Tn5.insertion.CPM.bw" \
+  --treatment_map "sample1=/path/to/sample1.chr1.10Mb.bam;sample2=/path/to/sample2.chr1.10Mb.bam;sample3=/path/to/sample3.chr1.10Mb.bam" \
+  --genome hg19 \
+  --genome_fasta /path/to/hg19.fa \
+  --chrom_sizes /path/to/hg19.chrom.sizes \
+  --annotation_gtf /path/to/hg19.ensGene.gtf.gz \
+  --expr_tsv /path/to/sample_FPKM_table.tsv
+```
+---
+
+### 2. Step-by-step demo
+
+#### 2.1 Nucleosome calling
+```bash
+run_nurepress_cli.py nucleosome \
+  --out_dir /path/to/test_data_out_step \
+  --samples sample1,sample2,sample3 \
+  --treatment_map "sample1=/path/to/sample1.chr1.10Mb.bam;sample2=/path/to/sample2.chr1.10Mb.bam;sample3=/path/to/sample3.chr1.10Mb.bam"
+```
+
+#### 2.2 Cluster from array BED inputs
+```bash
+run_nurepress_cli.py cluster \
+  --samples sample1,sample2,sample3 \
+  --regions_bed_map "sample1=/path/to/sample1.array.bed;sample2=/path/to/sample2.array.bed;sample3=/path/to/sample3.array.bed" \
+  --atac_bw_map "sample1=/path/to/sample1.Tn5.insertion.CPM.bw;sample2=/path/to/sample2.Tn5.insertion.CPM.bw;sample3=/path/to/sample3.Tn5.insertion.CPM.bw" \
+  --out_dir /path/to/test_data_out_step
+```
+
+---
+
+### 3. Downstream demo
+
+#### 3.1 Describe
+```bash
+run_nurepress_cli.py describe \
+  --out_dir /path/to/test_data_out_step \
+  --genome_fasta /path/to/hg19.fa \
+  --annotation_gtf /path/to/hg19.ensGene.gtf.gz \
+  --describe_skip_peak_module
+```
+
+#### 3.2 Motif
+```bash
+run_nurepress_cli.py motif \
+  --out_dir /path/to/test_data_out_step \
+  --genome hg19 \
+  --chrom_sizes /path/to/hg19.chrom.sizes \
+  --positions_map "sample1=/path/to/sample1_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls;sample2=/path/to/sample2_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls;sample3=/path/to/sample3_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls" \
+  --motif_mode edge_both \
+  --internal_region_mode both \
+  --inside_start_rel -475 \
+  --inside_end_rel -75 \
+  --inside_num_bins 2 \
+  --outside_start_bp 75 \
+  --outside_end_bp 675 \
+  --outside_num_bins 3 \
+  --target_clusters ALL \
+  --bg_multiple 2 \
+  --annotation_gtf /path/to/hg19.ensGene.gtf.gz \
+  --cluster_dir_default neutral \
+  --cluster_dir_map "C1=inside_low;C2=neutral" \
+  --require_positive_score \
+  --score_flank_bp 800 \
+  --score_edge_bp 200 \
+  --q_keep 0.95 \
+  --bg_match_location \
+  --min_n_target_arrays 30
+```
+
+#### 3.3 Score
+```bash
+run_nurepress_cli.py score \
+  --out_dir /path/to/test_data_out_step \
+  --expr_tsv /path/to/sample_FPKM_table.tsv
+```
+
+---
+
+### 4. Files expected in the demo dataset
+
+sample1.chr1.10Mb.bam
+sample2.chr1.10Mb.bam
+sample3.chr1.10Mb.bam
+
+sample1.Tn5.insertion.CPM.bw
+sample2.Tn5.insertion.CPM.bw
+sample3.Tn5.insertion.CPM.bw
+
+sample1.array.bed
+sample2.array.bed
+sample3.array.bed
+
+sample1_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+sample2_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+sample3_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+
+sample_FPKM_table.tsv
+
+Reference files:
+
+hg19.fa
+hg19.chrom.sizes
+hg19.ensGene.gtf.gz
+
+---
+
+### 5. Notes
+
+- The demo is intended for functional testing rather than full biological analysis.
+- All sample names in `--samples` must exactly match the keys used in the map-style arguments.
+- If you only want to verify that the pipeline is installed correctly, the minimal run example is usually sufficient.
+- If you want to inspect intermediate outputs or debug a specific stage, the step-by-step commands are more convenient.
+
+---
 
 ## Standard output structure
 
@@ -918,7 +1002,65 @@ Because of this design, a typical workflow is:
 
 ---
 
+## Quick examples
 
+### Full workflow with control BAMs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps nucleosome,array,cluster,describe,motif,score \
+  --samples sample1,sample2,sample3 \
+  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
+  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
+  --control_map "sample1=/path/to/sample1.input.bam;sample2=/path/to/sample2.input.bam;sample3=/path/to/sample3.input.bam" \
+  --genome hg38 \
+  --genome_fasta /path/to/genome.fa \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --annotation_gtf /path/to/annotation.gtf \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Full workflow without control BAMs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps nucleosome,array,cluster,describe,motif,score \
+  --samples sample1,sample2,sample3 \
+  --atac_bw_map "sample1=/path/to/sample1.atac.bw;sample2=/path/to/sample2.atac.bw;sample3=/path/to/sample3.atac.bw" \
+  --treatment_map "sample1=/path/to/sample1.H3K27me3.bam;sample2=/path/to/sample2.H3K27me3.bam;sample3=/path/to/sample3.H3K27me3.bam" \
+  --genome hg38 \
+  --genome_fasta /path/to/genome.fa \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --annotation_gtf /path/to/annotation.gtf \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Rerun only motif and score using existing outputs
+
+```bash
+run_nurepress_cli.py run \
+  --out_dir /path/to/output \
+  --steps motif,score \
+  --samples sample1,sample2,sample3 \
+  --annotation_gtf /path/to/annotation.gtf \
+  --chrom_sizes /path/to/genome.chrom.sizes \
+  --genome hg38 \
+  --expr_tsv /path/to/expression.tsv
+```
+
+### Rerun only score using existing describe and motif outputs
+
+```bash
+run_nurepress_cli.py score \
+  --out_dir /path/to/output \
+  --expr_tsv /path/to/expression.tsv
+```
+
+---
+
+---
 
 ## Troubleshooting
 
