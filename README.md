@@ -856,29 +856,29 @@ run_nurepress_cli.py score \
 
 ### 4. Files expected in the demo dataset
 
-sample1.chr1.10Mb.bam
-sample2.chr1.10Mb.bam
-sample3.chr1.10Mb.bam
+- sample1.chr1.10Mb.bam
+- sample2.chr1.10Mb.bam
+- sample3.chr1.10Mb.bam
 
-sample1.Tn5.insertion.CPM.bw
-sample2.Tn5.insertion.CPM.bw
-sample3.Tn5.insertion.CPM.bw
+- sample1.Tn5.insertion.CPM.bw
+- sample2.Tn5.insertion.CPM.bw
+- sample3.Tn5.insertion.CPM.bw
 
-sample1.array.bed
-sample2.array.bed
-sample3.array.bed
+- sample1.array.bed
+- sample2.array.bed
+- sample3.array.bed
 
-sample1_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
-sample2_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
-sample3_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+- sample1_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+- sample2_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
+- sample3_H3K27me3.bgsub.Fnor.smooth.positions.ref_adjust.xls
 
-sample_FPKM_table.tsv
+- sample_FPKM_table.tsv
 
 Reference files:
 
-hg19.fa
-hg19.chrom.sizes
-hg19.ensGene.gtf.gz
+- hg19.fa
+- hg19.chrom.sizes
+- hg19.ensGene.gtf.gz
 
 ---
 
